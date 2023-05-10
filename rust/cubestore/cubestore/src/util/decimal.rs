@@ -1,6 +1,9 @@
+use bigdecimal::BigDecimal;
+use deepsize::DeepSizeOf;
+use num::BigInt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, DeepSizeOf)]
 #[repr(transparent)]
 /// This it not a general-purpose decimal implementation. We use it inside [TableValue] to cement
 /// data format of decimals in CubeStore.
@@ -25,11 +28,23 @@ impl Decimal {
     }
 
     pub fn to_string(&self, scale: u8) -> String {
-        let n = 10_i64.pow(scale as u32);
-        let v = self.raw_value();
-        let integral = v / n;
-        let fractional = (v % n).abs();
-        format!("{}.{}", integral, fractional)
+        let big_decimal = BigDecimal::new(BigInt::from(self.raw_value), scale as i64);
+        let mut res = big_decimal.to_string();
+        if res.contains(".") {
+            let mut truncate_len = res.len();
+            for (i, c) in res.char_indices().rev() {
+                if c == '0' {
+                    truncate_len = i;
+                } else if c == '.' {
+                    truncate_len = i;
+                    break;
+                } else {
+                    break;
+                }
+            }
+            res.truncate(truncate_len);
+        }
+        res
     }
 }
 

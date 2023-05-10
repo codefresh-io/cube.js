@@ -87,7 +87,7 @@ a {
   img:not(.mainTabImg) {
     border: 1px solid #ECECF0;
     border-radius: 4px;
-    max-width: 100%;
+    width: 100%;
     margin: 24px 0;
     box-shadow: none !important;
   }
@@ -95,9 +95,30 @@ a {
   margin-bottom: 200px;
 }
 
+.titleWrapper {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: 28px;
+  padding-top: 48px;
+  margin-bottom: 24px;
+
+  @media screen and (max-width: 576px) {
+    flex-flow: column;
+    gap: 4px;
+  }
+
+  h1 {
+    margin: 0;
+    padding: 0;
+  }
+}
+
 .searchBoxWrapper {
   display: flex;
-  justify-content: center;
+  justify-content: flex-start;
+  padding: 12px 20px;
+  width: 100%;
 }
 
 .searchBox {
@@ -351,29 +372,34 @@ span.group-header {
 }
 
 .menuWrapperHack {
-
-  margin-top: -40px;
-  padding-top: 56px !important;
-
   @media screen and (max-width: 767px) {
-    margin-top: -118px;
-    padding-top: 118px !important;
+    height: 100% !important;
+    position: fixed;
+    top: 0;
+    padding-top: 70px !important;
+    margin-top: 0;
   }
 }
 
+.menuWrapperCol {
+  position: sticky;
+  top: 64px;
+}
+
 .menuWrapper {
-  height: 100%;
-  width: inherit;
+  // height: 100%;
+  height: calc(100vh - 64px);
+  width: 100%;
   background: $sidebar-bg;
-  padding: 16px 24px;
+  padding: 16px 24px 24px;
   overflow-y: auto;
   overflow-x: hidden;
-  position: fixed;
+  // position: fixed;
   //padding-left: calc(9999px + 24px);
   //padding-right: 24px;
   //margin-left: -9999px;
   //min-width: 245px;
-  max-height: calc(100% - 66px);
+  // max-height: calc(100% - 66px);
   //background: $light;
 
   @media screen and (max-width: 767px) {
@@ -662,8 +688,9 @@ span.group-header {
 .header {
   background: #fff;
   padding: 0 1rem;
-  position: fixed;
-  z-index: 1;
+  position: sticky;
+  top: 0;
+  z-index: 999999999;
   width: 100%;
   filter: drop-shadow(0px 0px 15px rgba(67, 67, 107, 0.1));
   height: $header-max-height;
@@ -743,8 +770,6 @@ span.group-header {
 }
 
 .contentColumn {
-  margin-top: 64px;
-
   @media screen and (max-width: 767px) {
     overflow-x: hidden;
 
@@ -983,122 +1008,6 @@ section[type=h2] h2 {
 
     .ant-radio-button-wrapper::before {
       background-color: white !important;
-    }
-  }
-}
-
-
-:global {
-  .gettingStartedGrid {
-    @include card-grid;
-
-    .gettingStartedItem {
-      @include card-grid-item;
-
-      a {
-        border-bottom: none;
-      }
-
-      &.originalWidth {
-        width: calc(100% / 3);
-      }
-
-      &:nth-child(even) {
-        @include card-grid-item-adjacent;
-      }
-
-      &.gettingStartedItemSlim {
-        .gettingStartedItemContent {
-          min-height: unset;
-          text-align: center;;
-
-          .gettingStartedItemImage {
-            margin-right: 1.25rem;
-
-            > img {
-              margin: unset;
-            }
-          }
-
-          .gettingStartedItemImage,
-          .gettingStartedItemLink {
-            display: inline-block;
-          }
-        }
-      }
-
-      .gettingStartedItemContent {
-        @include card-grid-item-content;
-        margin: 1.5rem;
-
-        .gettingStartedItemImage {
-          @include card-grid-item-image;
-          position: unset;
-          display: flex;
-          justify-content: center;
-
-          > img {
-            box-shadow: none !important;
-            border: none;
-            max-height: 160px;
-          }
-        }
-
-        .gettingStartedItemLink {
-          @include card-grid-item-link;
-          margin-top: 0.5rem;
-          text-align: center;
-        }
-
-        .gettingStartedItemText {
-          @include card-grid-item-text;
-        }
-      }
-    }
-  }
-
-  .connectingToDatabaseGrid {
-    @include card-grid;
-
-    > .ant-row {
-      display: flex;
-      flex-flow: row wrap;
-    }
-
-    .connectingToDatabaseItem {
-      @include card-grid-item-without-width;
-
-      a {
-        border-bottom: none;
-      }
-
-      .connectingToDatabaseItemContent {
-        @include card-grid-item-content;
-        margin: 1.5rem;
-
-        .connectingToDatabaseItemImage {
-          @include card-grid-item-image;
-          position: unset;
-          display: flex;
-          justify-content: center;
-
-          > img {
-            box-shadow: none !important;
-            border: none;
-            max-height: 160px;
-          }
-        }
-
-        .connectingToDatabaseItemLink {
-          @include card-grid-item-link;
-          margin-top: 0.5rem;
-          text-align: center;
-        }
-
-        .connectingToDatabaseItemText {
-          @include card-grid-item-text;
-        }
-      }
     }
   }
 }

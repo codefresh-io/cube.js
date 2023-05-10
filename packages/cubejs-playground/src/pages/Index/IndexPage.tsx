@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useState } from 'react';
-import { useHistory } from 'react-router';
+import { useHistory } from 'react-router-dom';
 
 import { useIsMounted, usePlaygroundContext } from '../../hooks';
 
@@ -14,6 +14,12 @@ export function IndexPage() {
     async function loadFiles() {
       const res = await fetch('/playground/files');
       const result = await res.json();
+
+      if (result.error?.includes('Model files not found')) {
+        setFiles([]);
+      } else if (result.error) {
+        throw result.error;
+      }
 
       if (isMounted()) {
         setFiles(result.files);

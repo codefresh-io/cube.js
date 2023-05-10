@@ -1,30 +1,73 @@
+/**
+ * @copyright Cube Dev, Inc.
+ * @license Apache-2.0
+ * @fileoverview The `MSSqlDriver` and related types declaration.
+ */
+
+const {
+  getEnv,
+  assertDataSource,
+} = require('@cubejs-backend/shared');
 const sql = require('mssql');
-const { BaseDriver } = require('@cubejs-backend/query-orchestrator');
+const { BaseDriver } = require('@cubejs-backend/base-driver');
+const QueryStream = require('./QueryStream');
+
 
 const GenericTypeToMSSql = {
+  boolean: 'bit',
   string: 'nvarchar(max)',
   text: 'nvarchar(max)',
   timestamp: 'datetime2',
+  uuid: 'uniqueidentifier'
 };
 
+const MSSqlToGenericType = {
+  bit: 'boolean',
+  uniqueidentifier: 'uuid',
+  datetime2: 'timestamp'
+}
+
+/**
+ * MS SQL driver class.
+ */
 class MSSqlDriver extends BaseDriver {
-  constructor(config) {
-    super();
+  /**
+   * Returns default concurrency value.
+   */
+  static getDefaultConcurrency() {
+    return 2;
+  }
+
+  /**
+   * Class constructor.
+   */
+  constructor(config = {}) {
+    super({
+      testConnectionTimeout: config.testConnectionTimeout,
+    });
+
+    const dataSource =
+      config.dataSource ||
+      assertDataSource('default');
+
     this.config = {
-      server: process.env.CUBEJS_DB_HOST,
-      database: process.env.CUBEJS_DB_NAME,
-      port: process.env.CUBEJS_DB_PORT && parseInt(process.env.CUBEJS_DB_PORT, 10),
-      user: process.env.CUBEJS_DB_USER,
-      password: process.env.CUBEJS_DB_PASS,
-      domain: process.env.CUBEJS_DB_DOMAIN && process.env.CUBEJS_DB_DOMAIN.trim().length > 0 ?
-        process.env.CUBEJS_DB_DOMAIN : undefined,
+      readOnly: true,
+      server: getEnv('dbHost', { dataSource }),
+      database: getEnv('dbName', { dataSource }),
+      port: getEnv('dbPort', { dataSource }),
+      user: getEnv('dbUser', { dataSource }),
+      password: getEnv('dbPass', { dataSource }),
+      domain: getEnv('dbDomain', { dataSource }),
       requestTimeout: 10 * 60 * 1000, // 10 minutes
       options: {
-        encrypt: process.env.CUBEJS_DB_SSL === 'true',
+        encrypt: getEnv('dbSsl', { dataSource }),
         useUTC: false
       },
       pool: {
-        max: 8,
+        max:
+          config.maxPoolSize ||
+          getEnv('dbMaxPoolSize', { dataSource }) ||
+          8,
         min: 0,
         evictionRunIntervalMillis: 10000,
         softIdleTimeoutMillis: 30000,
@@ -34,11 +77,14 @@ class MSSqlDriver extends BaseDriver {
       },
       ...config
     };
-    this.connectionPool = new sql.ConnectionPool(this.config);
+    const { readOnly, ...poolConfig } = this.config;
+    this.connectionPool = new sql.ConnectionPool(poolConfig);
     this.initialConnectPromise = this.connectionPool.connect();
   }
 
   static driverEnvVariables() {
+    // TODO (buntarb): check how this method can/must be used with split
+    // names by the data source.
     return [
       'CUBEJS_DB_HOST', 'CUBEJS_DB_NAME', 'CUBEJS_DB_PORT', 'CUBEJS_DB_USER', 'CUBEJS_DB_PASS', 'CUBEJS_DB_DOMAIN'
     ];
@@ -46,6 +92,129 @@ class MSSqlDriver extends BaseDriver {
 
   testConnection() {
     return this.initialConnectPromise.then((pool) => pool.request().query('SELECT 1 as number'));
+  }
+
+  /**
+   * Executes query in streaming mode.
+   *
+   * @param {string} query 
+   * @param {Array} values 
+   * @param {{ highWaterMark: number? }} options
+   * @return {Promise<StreamTableDataWithTypes>}
+   */
+  async stream(
+    query,
+    values,
+    options,
+  ) {
+    const pool = await this.initialConnectPromise;
+    const request = pool.request();
+
+    request.stream = true;
+    (values || []).forEach((v, i) => {
+      request.input(`_${i + 1}`, v);
+    });
+    request.query(query);
+
+    const stream = new QueryStream(request, options?.highWaterMark);
+    const fields = await new Promise((resolve, reject) => {
+      request.on('recordset', (columns) => {
+        resolve(this.mapFields(columns));
+      });
+      request.on('error', (err) => {
+        reject(err);
+      });
+    });
+    return {
+      rowStream: stream,
+      types: fields,
+      release: async () => {
+        request.cancel();
+      },
+    };
+  }
+
+  /**
+   * @param {{
+   *   [name: string]: {
+   *     index: number,
+   *     name: string,
+   *     type: *,
+   *     nullable: boolean,
+   *     caseSensitive: boolean,
+   *     identity: boolean,
+   *     readOnly: boolean,
+   *     length: number?,
+   *     scale: number?,
+   *     precision: number?
+   *   }
+   * }} fields 
+   */
+  mapFields(fields) {
+    return Object.keys(fields).map((field) => {
+      let type;
+      switch (fields[field].type) {
+        case sql.Bit:
+          type = 'boolean';
+          break;
+        // integers
+        case sql.Int:
+        case sql.SmallInt:
+        case sql.TinyInt:
+          type = 'int';
+          break;
+        // float
+        case sql.Real:
+        case sql.Money:
+        case sql.SmallMoney:
+        case sql.Numeric:
+          type = 'float';
+          break;
+        // double
+        case sql.Float:
+        case sql.Decimal:
+          type = 'double';
+          break;
+        // strings
+        case sql.Char:
+        case sql.NChar:
+        case sql.Text:
+        case sql.VarChar:
+        case sql.NVarChar:
+        case sql.Xml:
+          type = 'text';
+          break;
+        // date and time
+        case sql.Time:
+          type = 'date';
+          break;
+        case sql.Date:
+          type = 'date';
+          break;
+        case sql.DateTime:
+        case sql.DateTime2:
+        case sql.SmallDateTime:
+        case sql.DateTimeOffset:
+          type = 'date';
+          break;
+        // others
+        case sql.UniqueIdentifier:
+        case sql.Variant:
+        case sql.Binary:
+        case sql.VarBinary:
+        case sql.Image:
+        case sql.UDT:
+        case sql.Geography:
+        case sql.Geometry:
+          type = 'string';
+          break;
+        // unknown
+        default:
+          type = 'string';
+          break;
+      }
+      return { name: fields[field].name, type };
+    });
   }
 
   query(query, values) {
@@ -114,7 +283,11 @@ class MSSqlDriver extends BaseDriver {
     `;
   }
 
-  async downloadQueryResults(query, values) {
+  async downloadQueryResults(query, values, options) {
+    if ((options || {}).streamImport) {
+      return this.stream(query, values, options);
+    }
+
     const result = await this.query(query, values);
     const types = Object.keys(result.columns).map((key) => ({
       name: result.columns[key].name,
@@ -131,8 +304,16 @@ class MSSqlDriver extends BaseDriver {
     return GenericTypeToMSSql[columnType] || super.fromGenericType(columnType);
   }
 
+  toGenericType(columnType){
+    return MSSqlToGenericType[columnType] || super.toGenericType(columnType);
+  }
+
   readOnly() {
     return !!this.config.readOnly;
+  }
+
+  wrapQueryWithLimit(query) {
+    query.query = `SELECT TOP ${query.limit} * FROM (${query.query}) AS t`;
   }
 }
 

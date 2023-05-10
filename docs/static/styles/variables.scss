@@ -4,6 +4,7 @@ $purple-04: #CAC9FF;
 $purple-text: #665DE8;
 $dark-01: #141446;
 $dark-04: #A1A1B5;
+$dark-05: #E5E5EC;
 $pink: #FF6492;
 $pink-02: #FF83A8;
 $pink-04: #FFC1D3;
@@ -34,3 +35,10 @@ $space: 16px;
 $header-font: "Cera Pro", "Avenir Next", Avenir, "Helvetica Neue", Helvetica, Ubuntu, "DejaVu Sans", Arial, sans-serif;
 $body-font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", "Avenir Next", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
 $code-font: "Source Code Pro", Inconsolata, Consolas, Courier, "Courier New", "Liberation Mono", monospace;
+
+// @see https://ant.design/components/grid/#Col
+$bp-sm: 576px;
+$bp-md: 768px;
+$bp-lg: 992px;
+$bp-xl: 1200px;
+$bp-xxl: 1600px;

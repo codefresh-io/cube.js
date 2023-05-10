@@ -1,16 +1,12 @@
-#![feature(in_band_lifetimes)]
 #![feature(test)]
 #![feature(backtrace)]
 #![feature(async_closure)]
 #![feature(drain_filter)]
 #![feature(box_patterns)]
 #![feature(slice_internals)]
-#![feature(raw)]
-#![feature(total_cmp)]
 #![feature(vec_into_raw_parts)]
 #![feature(hash_set_entry)]
 #![feature(map_first_last)]
-#![feature(arc_new_cyclic)]
 #![feature(is_sorted)]
 #![feature(result_flattening)]
 // #![feature(trace_macros)]
@@ -18,17 +14,20 @@
 // trace_macros!(true);
 #[macro_use]
 extern crate lazy_static;
+extern crate core;
 
 use crate::metastore::TableId;
 use crate::remotefs::queue::RemoteFsOpResult;
 use arrow::error::ArrowError;
 use cubehll::HllError;
 use cubezetasketch::ZetaError;
+use datafusion::cube_ext::catch_unwind::PanicError;
 use flexbuffers::{DeserializationError, ReaderError};
 use log::SetLoggerError;
 use parquet::errors::ParquetError;
 use serde_derive::{Deserialize, Serialize};
 use sqlparser::parser::ParserError;
+use std::any::Any;
 use std::backtrace::Backtrace;
 use std::fmt;
 use std::fmt::Display;
@@ -40,6 +39,7 @@ use tokio::sync::mpsc::error::SendError;
 use tokio::time::error::Elapsed;
 
 pub mod app_metrics;
+pub mod cachestore;
 pub mod cluster;
 pub mod codegen;
 pub mod config;
@@ -61,7 +61,7 @@ pub mod util;
 pub use datafusion::cube_ext::spawn;
 pub use datafusion::cube_ext::spawn_blocking;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CubeError {
     pub message: String,
     pub backtrace: String,
@@ -70,14 +70,16 @@ pub struct CubeError {
 
 impl std::error::Error for CubeError {}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum CubeErrorCauseType {
     User,
     Internal,
+    CorruptData,
+    Panic,
 }
 
 impl CubeError {
-    pub fn display_with_backtrace(&'a self) -> impl Display + 'a {
+    pub fn display_with_backtrace<'a>(&'a self) -> impl Display + 'a {
         struct WithBt<'a>(&'a CubeError);
         impl Display for WithBt<'_> {
             fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -90,6 +92,14 @@ impl CubeError {
             }
         }
         WithBt(self)
+    }
+
+    pub fn elide_backtrace(&self) -> CubeError {
+        CubeError {
+            message: self.message.clone(),
+            backtrace: String::new(),
+            cause: self.cause.clone(),
+        }
     }
 
     pub fn user(message: String) -> CubeError {
@@ -108,6 +118,29 @@ impl CubeError {
         }
     }
 
+    pub fn corrupt_data(message: String) -> CubeError {
+        CubeError {
+            message,
+            backtrace: String::new(),
+            cause: CubeErrorCauseType::CorruptData,
+        }
+    }
+
+    pub fn panic(message: String) -> CubeError {
+        CubeError {
+            message,
+            backtrace: String::new(),
+            cause: CubeErrorCauseType::Panic,
+        }
+    }
+
+    pub fn is_corrupt_data(&self) -> bool {
+        match self.cause {
+            CubeErrorCauseType::CorruptData => true,
+            _ => false,
+        }
+    }
+
     pub fn from_error<E: fmt::Display>(error: E) -> CubeError {
         CubeError {
             message: format!("{}", error),
@@ -123,11 +156,24 @@ impl CubeError {
             cause: CubeErrorCauseType::Internal,
         }
     }
+
+    pub fn from_panic_payload(payload: Box<dyn Any + Send>) -> Self {
+        if let Some(reason) = payload.downcast_ref::<&str>() {
+            CubeError::panic(format!("Reason: {}", reason))
+        } else if let Some(reason) = payload.downcast_ref::<String>() {
+            CubeError::panic(format!("Reason: {}", reason))
+        } else {
+            CubeError::panic("Without reason".to_string())
+        }
+    }
 }
 
 impl fmt::Display for CubeError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_fmt(format_args!("{:?}: {}", self.cause, self.message))
+        match self.cause {
+            CubeErrorCauseType::User => f.write_fmt(format_args!("{}", self.message)),
+            _ => f.write_fmt(format_args!("{:?}: {}", self.cause, self.message)),
+        }
     }
 }
 
@@ -140,6 +186,12 @@ impl From<flexbuffers::DeserializationError> for CubeError {
 impl From<rocksdb::Error> for CubeError {
     fn from(v: rocksdb::Error) -> Self {
         CubeError::from_error(v.into_string())
+    }
+}
+
+impl From<flatbuffers::InvalidFlatbuffer> for CubeError {
+    fn from(v: flatbuffers::InvalidFlatbuffer) -> Self {
+        CubeError::from_debug_error(v)
     }
 }
 
@@ -196,7 +248,17 @@ impl From<Elapsed> for CubeError {
 
 impl From<datafusion::error::DataFusionError> for CubeError {
     fn from(v: datafusion::error::DataFusionError) -> Self {
-        CubeError::from_error(v)
+        match v {
+            datafusion::error::DataFusionError::Panic(msg) => CubeError::panic(msg),
+            v => CubeError::from_error(v),
+        }
+    }
+}
+
+impl From<PanicError> for CubeError {
+    fn from(v: PanicError) -> Self {
+        let PanicError { msg } = v;
+        CubeError::panic(msg)
     }
 }
 

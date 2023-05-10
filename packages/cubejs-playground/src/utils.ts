@@ -95,7 +95,19 @@ const peerDependencies = {
   'react-chartjs-2': 'chart.js',
 };
 
-export function codeSandboxDefinition(template, files, dependencies = []) {
+const fixes = {
+  react: '17.0.1',
+  'react-dom': '17.0.1',
+  'react-chartjs-2': '3.0.3',
+  'chart.js': '3.4.0',
+  antd: '4.16.13',
+};
+
+export function codeSandboxDefinition(
+  template,
+  files,
+  dependencies: Array<string | [string, string]> = []
+) {
   return {
     files: {
       ...bootstrapDefinition[template]?.files,
@@ -107,13 +119,18 @@ export function codeSandboxDefinition(template, files, dependencies = []) {
           dependencies: {
             ...bootstrapDefinition[template]?.dependencies,
             ...dependencies.reduce((memo, d) => {
-              const [name, version] = Array.isArray(d) ? d : [d, 'latest'];
+              const [name, version] = Array.isArray(d)
+                ? d
+                : [d, fixes[d] || 'latest'];
 
               return {
                 ...memo,
                 [name]: version,
                 ...(peerDependencies[name]
-                  ? { [peerDependencies[name]]: 'latest' }
+                  ? {
+                      [peerDependencies[name]]:
+                        fixes[peerDependencies[name]] || 'latest',
+                    }
                   : null),
               };
             }, {}),
@@ -231,4 +248,29 @@ export function prettifyObject(value: Object) {
     .replaceAll(/([^\\]|)'/g, `\\'`)
     .replaceAll(/"/g, `'`)
     .replaceAll(/\[[\s]+\]/g, '[]');
+}
+
+export function containsPrivateFields(queryMembers: string[], meta: any) {
+  if (!meta) {
+    return false;
+  }
+
+  return queryMembers.some((member) => {
+    const [cube] = member.split('.');
+    const config = meta.cubes.find((c) => c.name === cube);
+
+    if (config) {
+      if (config.public === false) {
+        return true;
+      }
+
+      return [
+        ...config.measures,
+        ...config.dimensions,
+        ...config.segments,
+      ].some((m) => {
+        return m.name === member && m.isVisible === false;
+      });
+    }
+  });
 }

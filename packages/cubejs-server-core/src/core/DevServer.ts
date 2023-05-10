@@ -1,6 +1,6 @@
 /* eslint-disable global-require,no-restricted-syntax */
 import dotenv from '@cubejs-backend/dotenv';
-import { CubePreAggregationConverter, CubeSchemaConverter } from '@cubejs-backend/schema-compiler';
+import { CubePreAggregationConverter, CubeSchemaConverter, ScaffoldingTemplate, SchemaFormat } from '@cubejs-backend/schema-compiler';
 import spawn from 'cross-spawn';
 import path from 'path';
 import fs from 'fs-extra';
@@ -11,13 +11,13 @@ import jwt from 'jsonwebtoken';
 import isDocker from 'is-docker';
 import type { Application as ExpressApplication, Request, Response } from 'express';
 import type { ChildProcess } from 'child_process';
-import { executeCommand, getEnv, packageExists } from '@cubejs-backend/shared';
+import { executeCommand, getEnv, keyByDataSource, packageExists } from '@cubejs-backend/shared';
 import crypto from 'crypto';
 
 import type { BaseDriver } from '@cubejs-backend/query-orchestrator';
 
-import { CubejsServerCore, ServerCoreInitializedOptions } from './server';
-import { ExternalDbTypeFn } from './types';
+import { CubejsServerCore } from './server';
+import { ExternalDbTypeFn, ServerCoreInitializedOptions, DatabaseType } from './types';
 import DriverDependencies from './DriverDependencies';
 
 const repo = {
@@ -77,9 +77,9 @@ export class DevServer {
       try {
         await handler(req, res, next);
       } catch (e) {
-        console.error((e.stack || e).toString());
-        this.cubejsServer.event('Dev Server Error', { error: (e.stack || e).toString() });
-        res.status(500).json({ error: (e.stack || e).toString() });
+        console.error(((e as Error).stack || e).toString());
+        this.cubejsServer.event('Dev Server Error', { error: ((e as Error).stack || e).toString() });
+        res.status(500).json({ error: ((e as Error).stack || e).toString() });
       }
     };
 
@@ -151,13 +151,24 @@ export class DevServer {
       });
       const tablesSchema = req.body.tablesSchema || (await driver.tablesSchema());
 
-      const ScaffoldingTemplate = require('@cubejs-backend/schema-compiler/scaffolding/ScaffoldingTemplate');
-      const scaffoldingTemplate = new ScaffoldingTemplate(tablesSchema, driver);
+      if (!Object.values(SchemaFormat).includes(req.body.format)) {
+        throw new Error(`Unknown schema format. Must be one of ${Object.values(SchemaFormat)}`);
+      }
+
+      const scaffoldingTemplate = new ScaffoldingTemplate(tablesSchema, driver, {
+        format: req.body.format,
+        snakeCase: true
+      });
       const files = scaffoldingTemplate.generateFilesByTableNames(req.body.tables, { dataSource });
 
       const schemaPath = options.schemaPath || 'schema';
 
-      await Promise.all(files.map(file => fs.writeFile(path.join(schemaPath, file.fileName), file.content)));
+      await fs.emptyDir(path.join(schemaPath, 'cubes'));
+      await fs.emptyDir(path.join(schemaPath, 'views'));
+      
+      await fs.writeFile(path.join(schemaPath, 'views', '.gitkeep'), '');
+      await Promise.all(files.map(file => fs.writeFile(path.join(schemaPath, 'cubes', file.fileName), file.content)));
+
       res.json({ files });
     }));
 
@@ -297,7 +308,7 @@ export class DevServer {
             { cwd: path.resolve('.') }
           );
         } catch (error) {
-          driverError = error;
+          driverError = error as Error;
         } finally {
           driverPromise = null;
         }
@@ -414,48 +425,77 @@ export class DevServer {
       }
     }));
 
-    app.post('/playground/test-connection', catchErrors(async (req, res) => {
-      const { variables = {} } = req.body || {};
+    /**
+     * The `/playground/test-connection` endpoint request.
+     */
+    type TestConnectionRequest = {
+      body: {
+        dataSource?: string,
+        variables: {
+          [env: string]: string,
+        },
+      },
+    };
 
-      let driver: BaseDriver | null = null;
+    app.post('/playground/test-connection', catchErrors(
+      async (req: TestConnectionRequest, res) => {
+        const { dataSource, variables } = req.body || {};
 
-      try {
-        if (!variables.CUBEJS_DB_TYPE) {
-          throw new Error('CUBEJS_DB_TYPE is required');
-        }
+        // With multiple data sources enabled, we need to use
+        // CUBEJS_DS_<dataSource>_DB_TYPE environment variable
+        // instead of CUBEJS_DB_TYPE.
+        const type = keyByDataSource('CUBEJS_DB_TYPE', dataSource);
 
-        // Backup env variables for restoring
-        const originalProcessEnv = process.env;
-        process.env = {
-          ...process.env,
-        };
+        let driver: BaseDriver | null = null;
 
-        for (const [envName, value] of Object.entries(variables)) {
-          process.env[envName] = <string>value;
-        }
+        try {
+          if (!variables || !variables[type]) {
+            throw new Error(`${type} is required`);
+          }
 
-        driver = CubejsServerCore.createDriver(variables.CUBEJS_DB_TYPE);
+          // Backup env variables for restoring
+          const originalProcessEnv = process.env;
+          process.env = {
+            ...process.env,
+          };
 
-        // Restore original process.env
-        process.env = originalProcessEnv;
+          // We suppose that variables names passed to the endpoint have their
+          // final form depending on whether multiple data sources are enabled
+          // or not. So, we don't need to convert anything here.
+          for (const [envName, value] of Object.entries(variables)) {
+            process.env[envName] = <string>value;
+          }
 
-        await driver.testConnection();
+          // With multiple data sources enabled, we need to put the dataSource
+          // parameter to the driver instance to read an appropriate set of
+          // driver configuration parameters. It can be undefined if multiple
+          // data source is disabled.
+          driver = CubejsServerCore.createDriver(
+            <DatabaseType>variables[type],
+            { dataSource },
+          );
 
-        this.cubejsServer.event('test_database_connection_success');
+          // Restore original process.env
+          process.env = originalProcessEnv;
 
-        return res.json('ok');
-      } catch (error) {
-        this.cubejsServer.event('test_database_connection_error');
+          await driver.testConnection();
 
-        return res.status(400).json({
-          error: error.toString()
-        });
-      } finally {
-        if (driver && (<any>driver).release) {
-          await (<any>driver).release();
+          this.cubejsServer.event('test_database_connection_success');
+
+          return res.json('ok');
+        } catch (error) {
+          this.cubejsServer.event('test_database_connection_error');
+
+          return res.status(400).json({
+            error: error.toString()
+          });
+        } finally {
+          if (driver && (<any>driver).release) {
+            await (<any>driver).release();
+          }
         }
       }
-    }));
+    ));
 
     app.post('/playground/env', catchErrors(async (req, res) => {
       let { variables = {} } = req.body || {};
@@ -463,20 +503,41 @@ export class DevServer {
       if (!variables.CUBEJS_API_SECRET) {
         variables.CUBEJS_API_SECRET = options.apiSecret;
       }
-
-      // CUBEJS_EXTERNAL_DEFAULT will be default in next major version, let's test it with docker too
+      
+      let envs: Record<string, string> = {};
+      const envPath = path.join(process.cwd(), '.env');
+      if (fs.existsSync(envPath)) {
+        envs = dotenv.parse(fs.readFileSync(envPath));
+      }
+      
+      const schemaPath = envs.CUBEJS_SCHEMA_PATH || process.env.CUBEJS_SCHEMA_PATH || 'model';
+      
       variables.CUBEJS_EXTERNAL_DEFAULT = 'true';
       variables.CUBEJS_SCHEDULED_REFRESH_DEFAULT = 'true';
       variables.CUBEJS_DEV_MODE = 'true';
+      variables.CUBEJS_SCHEMA_PATH = schemaPath;
       variables = Object.entries(variables).map(([key, value]) => ([key, value].join('=')));
 
-      const repositoryPath = path.join(process.cwd(), options.schemaPath);
+      const repositoryPath = path.join(process.cwd(), schemaPath);
 
       if (!fs.existsSync(repositoryPath)) {
         fs.mkdirSync(repositoryPath);
       }
 
       fs.writeFileSync(path.join(process.cwd(), '.env'), variables.join('\n'));
+
+      if (!fs.existsSync(path.join(process.cwd(), 'package.json'))) {
+        fs.writeFileSync(
+          path.join(process.cwd(), 'package.json'),
+          JSON.stringify({
+            name: 'cube-docker',
+            version: '0.0.1',
+            private: true,
+            createdAt: new Date().toJSON(),
+            dependencies: {}
+          }, null, 2)
+        );
+      }
 
       dotenv.config({ override: true });
 
@@ -508,7 +569,7 @@ export class DevServer {
       try {
         await schemaConverter.generate();
       } catch (error) {
-        res.status(400).json({ error: error.message || error });
+        res.status(400).json({ error: (error as Error).message || error });
       }
 
       schemaConverter.getSourceFiles().forEach(({ cubeName: currentCubeName, fileName, source }) => {
@@ -526,6 +587,6 @@ export class DevServer {
       .update(apiSecret)
       .digest('hex')
       .replace(/[^\d]/g, '')
-      .substr(0, 10);
+      .slice(0, 10);
   }
 }

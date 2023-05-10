@@ -33,6 +33,27 @@ const asserts: [options: QueryTestOptions, query: Query][] = [
     }
   ],
   [
+    { name: 'Rolling with Quarter granularity' },
+    {
+      measures: [
+        'visitors.checkinsRollingTotal',
+      ],
+      dimensions: [
+        'visitors.source'
+      ],
+      timezone: 'UTC',
+      timeDimensions: [{
+        dimension: 'visitors.createdAt',
+        granularity: 'quarter',
+        dateRange: ['2017-01-01', '2017-01-05']
+      }],
+      order: {
+        'visitors.createdAt': 'asc',
+        'visitors.source': 'asc'
+      }
+    }
+  ],
+  [
     { name: 'Rolling Mixed' },
     {
       measures: [
@@ -97,7 +118,7 @@ export function createBirdBoxTestCase(name: string, entrypoint: () => Promise<Bi
 
     let birdbox: BirdBox;
     let httpClient: CubejsApi;
-    let wsClient: CubejsApi;
+    let _wsClient: CubejsApi;
     let wsTransport: WebSocketTransport;
 
     // eslint-disable-next-line consistent-return
@@ -113,7 +134,7 @@ export function createBirdBoxTestCase(name: string, entrypoint: () => Promise<Bi
         wsTransport = new WebSocketTransport({
           apiUrl: birdbox.configuration.apiUrl,
         });
-        wsClient = cubejs(async () => '', {
+        _wsClient = cubejs(async () => '', {
           apiUrl: birdbox.configuration.apiUrl,
           transport: wsTransport,
         });
