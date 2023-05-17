@@ -42,6 +42,10 @@ steps:
       NPM_TOKEN: '${{NPM_TOKEN}}'
       DIR: 'cube.js/packages/cubejs-bigquery-driver'
     stage: "publish"
+    when:
+      branch:
+        only:
+          - master
 
   deploy_postgres_driver_to_npm:
     title: 'Deploy postgres-driver'
@@ -51,6 +55,10 @@ steps:
       NPM_TOKEN: '${{NPM_TOKEN}}'
       DIR: 'cube.js/packages/cubejs-postgres-driver'
     stage: "publish"
+    when:
+      branch:
+        only:
+          - master
 
   deploy_server_core_to_npm:
     title: 'Deploy server-core'
@@ -60,4 +68,8 @@ steps:
       NPM_TOKEN: '${{NPM_TOKEN}}'
       DIR: 'cube.js/packages/cubejs-server-core'
     stage: "publish"
+    when:
+      branch:
+        only:
+          - master
 
