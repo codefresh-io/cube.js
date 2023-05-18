@@ -3684,13 +3684,13 @@
     ramda "^0.27.0"
     redis "^3.0.2"
 
-"@cubejs-backend/query-orchestrator@npm:@codefresh-io/cubejs-backend-query-orchestrator@0.30.77":
-  version "0.30.77"
-  resolved "https://registry.yarnpkg.com/@codefresh-io/cubejs-backend-query-orchestrator/-/cubejs-backend-query-orchestrator-0.30.77.tgz#0c61bbc329a6d114037165d982294921400c95a1"
-  integrity sha512-2dh4isz9RIMJGkkeddHKCq43iUIVYogwj68f2eqbEelf90F88UhaNv48nhV4dF4BNdWDdyVaybsoUh8UB8lBGQ==
+"@cubejs-backend/query-orchestrator@npm:@codefresh-io/cubejs-backend-query-orchestrator@0.30.78":
+  version "0.30.78"
+  resolved "https://registry.yarnpkg.com/@codefresh-io/cubejs-backend-query-orchestrator/-/cubejs-backend-query-orchestrator-0.30.78.tgz#454375e920f31195415ea41e5f6f3d8e158c72c7"
+  integrity sha512-EKHVq7r5kQqtp6d6bZpWmh8QFjxmqCMlkb4LspOcwmwMn2rqhZfH5Zoir0VmB7CU/Z01ZiuyxSvyebYrQfjVlA==
   dependencies:
     "@cubejs-backend/base-driver" "^0.30.73"
-    "@cubejs-backend/shared" "npm:@codefresh-io/cubejs-backend-shared@0.30.71"
+    "@cubejs-backend/shared" "npm:@codefresh-io/cubejs-backend-shared@0.30.72"
     csv-write-stream "^2.0.0"
     es5-ext "0.10.53"
     generic-pool "^3.7.1"
@@ -3735,25 +3735,6 @@
   version "0.30.69"
   resolved "https://registry.yarnpkg.com/@cubejs-backend/shared/-/shared-0.30.69.tgz#b049fed6d71474d16256a2db53c426bd3093106a"
   integrity sha512-eVyMmBqI4iLBSwUBfzHWsYgoU4uNfywDZ9fElg/u0RghjQTC2tGXItAgn3Wpdq8ZtHOXdrX8qYSaKu8bq5ipgA==
-  dependencies:
-    "@oclif/color" "^0.1.2"
-    bytes "^3.1.0"
-    cli-progress "^3.9.0"
-    cross-spawn "^7.0.3"
-    decompress "^4.2.1"
-    env-var "^6.3.0"
-    fs-extra "^9.1.0"
-    http-proxy-agent "^4.0.1"
-    moment-range "^4.0.1"
-    moment-timezone "^0.5.33"
-    node-fetch "^2.6.1"
-    shelljs "^0.8.5"
-    throttle-debounce "^3.0.1"
-
-"@cubejs-backend/shared@npm:@codefresh-io/cubejs-backend-shared@0.30.71":
-  version "0.30.71"
-  resolved "https://registry.yarnpkg.com/@codefresh-io/cubejs-backend-shared/-/cubejs-backend-shared-0.30.71.tgz#4a18a1c927b0ab140c483644ae08501680463185"
-  integrity sha512-KCqyZSgMk6fXlIaT8sg+66fRQTH58xWvoht78ewC+OpaLwdvBlzDfBrNpxVI7FsL5R80L9g1i/qNl0q52WpVSA==
   dependencies:
     "@oclif/color" "^0.1.2"
     bytes "^3.1.0"
