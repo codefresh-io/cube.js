@@ -3684,6 +3684,23 @@
     ramda "^0.27.0"
     redis "^3.0.2"
 
+"@cubejs-backend/query-orchestrator@npm:@codefresh-io/cubejs-backend-query-orchestrator@0.30.77":
+  version "0.30.77"
+  resolved "https://registry.yarnpkg.com/@codefresh-io/cubejs-backend-query-orchestrator/-/cubejs-backend-query-orchestrator-0.30.77.tgz#0c61bbc329a6d114037165d982294921400c95a1"
+  integrity sha512-2dh4isz9RIMJGkkeddHKCq43iUIVYogwj68f2eqbEelf90F88UhaNv48nhV4dF4BNdWDdyVaybsoUh8UB8lBGQ==
+  dependencies:
+    "@cubejs-backend/base-driver" "^0.30.73"
+    "@cubejs-backend/shared" "npm:@codefresh-io/cubejs-backend-shared@0.30.71"
+    csv-write-stream "^2.0.0"
+    es5-ext "0.10.53"
+    generic-pool "^3.7.1"
+    ioredis "^4.27.8"
+    lru-cache "^6.0.0"
+    moment-range "^4.0.2"
+    moment-timezone "^0.5.33"
+    ramda "^0.27.0"
+    redis "^3.0.2"
+
 "@cubejs-backend/server-core@^0.30.75":
   version "0.30.75"
   resolved "https://registry.yarnpkg.com/@cubejs-backend/server-core/-/server-core-0.30.75.tgz#8dfe6d306adfc8281742b445fd935a84427cbbd6"
