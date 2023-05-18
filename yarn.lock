@@ -3769,6 +3769,25 @@
     shelljs "^0.8.5"
     throttle-debounce "^3.0.1"
 
+"@cubejs-backend/shared@npm:@codefresh-io/cubejs-backend-shared@0.30.72":
+  version "0.30.72"
+  resolved "https://registry.yarnpkg.com/@codefresh-io/cubejs-backend-shared/-/cubejs-backend-shared-0.30.72.tgz#5d63301935a1b035bbb04b801289371b4462d085"
+  integrity sha512-AO4/GPLhNdc0YkF9+bAufxqDl22vIXxNkj2qwhSo1kj0ubOMEtAf9gi8SrBu4gQdrXZgnFwEgcUHom7mNSg8Vw==
+  dependencies:
+    "@oclif/color" "^0.1.2"
+    bytes "^3.1.0"
+    cli-progress "^3.9.0"
+    cross-spawn "^7.0.3"
+    decompress "^4.2.1"
+    env-var "^6.3.0"
+    fs-extra "^9.1.0"
+    http-proxy-agent "^4.0.1"
+    moment-range "^4.0.1"
+    moment-timezone "^0.5.33"
+    node-fetch "^2.6.1"
+    shelljs "^0.8.5"
+    throttle-debounce "^3.0.1"
+
 "@cubejs-infra/node-pre-gyp-github@^1.0.3":
   version "1.0.3"
   resolved "https://registry.yarnpkg.com/@cubejs-infra/node-pre-gyp-github/-/node-pre-gyp-github-1.0.3.tgz#5385b5f3ed4225b3e3664db8a4be37883fce0362"
