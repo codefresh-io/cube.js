@@ -1,6 +1,6 @@
 {
   "name": "@codefresh-io/cubejs-backend-shared",
-  "version": "0.30.71",
+  "version": "0.30.72",
   "description": "Shared code for Cube.js backend packages",
   "main": "dist/src/index.js",
   "typings": "dist/src/index.d.ts",
