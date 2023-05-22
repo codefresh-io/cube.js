@@ -23,7 +23,9 @@ import { QueryStream } from './QueryStream';
 const GenericTypeToPostgres: Record<GenericDataBaseType, string> = {
   string: 'text',
   double: 'decimal',
+  // Codefresh mapping for pre-aggregation to work on postgres with large numbers
   int: 'int8',
+  //
   // Revert mapping for internal pre-aggregations
   HLL_POSTGRES: 'hll',
 };
