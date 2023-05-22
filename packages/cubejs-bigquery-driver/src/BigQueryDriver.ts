@@ -1,12 +1,28 @@
-/* eslint-disable no-underscore-dangle */
+/**
+ * @copyright Cube Dev, Inc.
+ * @license Apache-2.0
+ * @fileoverview The `BigQueryDriver` and related types declaration.
+ */
+
+import {
+  getEnv,
+  assertDataSource,
+  pausePromise,
+  Required,
+} from '@cubejs-backend/shared';
 import R from 'ramda';
-import { BigQuery, BigQueryOptions, Dataset, Job, QueryRowsResponse } from '@google-cloud/bigquery';
+import {
+  BigQuery,
+  BigQueryOptions,
+  Dataset,
+  Job,
+  QueryRowsResponse,
+} from '@google-cloud/bigquery';
 import { Bucket, Storage } from '@google-cloud/storage';
 import {
-  BaseDriver, DownloadTableCSVData,
+  BaseDriver, DownloadQueryResultsOptions, DownloadQueryResultsResult, DownloadTableCSVData,
   DriverInterface, QueryOptions, StreamTableData,
 } from '@cubejs-backend/base-driver';
-import { getEnv, pausePromise, Required } from '@cubejs-backend/shared';
 import { Query } from '@google-cloud/bigquery/build/src/bigquery';
 import { HydrationStream } from './HydrationStream';
 
@@ -18,11 +34,19 @@ interface BigQueryDriverOptions extends BigQueryOptions {
   location?: string,
   pollTimeout?: number,
   pollMaxInterval?: number,
-  maxPoolSize?: number,
+
+  /**
+   * The export bucket CSV file escape symbol.
+   */
+  exportBucketCsvEscapeSymbol?: string,
 }
 
-type BigQueryDriverOptionsInitialized = Required<BigQueryDriverOptions, 'pollTimeout' | 'pollMaxInterval'>;
+type BigQueryDriverOptionsInitialized =
+  Required<BigQueryDriverOptions, 'pollTimeout' | 'pollMaxInterval'>;
 
+/**
+ * BigQuery driver.
+ */
 export class BigQueryDriver extends BaseDriver implements DriverInterface {
   /**
    * Returns default concurrency value.
@@ -39,24 +63,70 @@ export class BigQueryDriver extends BaseDriver implements DriverInterface {
 
   protected readonly bucket: Bucket | null = null;
 
-  public constructor(config: BigQueryDriverOptions = {}) {
-    super();
+  /**
+   * Class constructor.
+   */
+  public constructor(
+    config: BigQueryDriverOptions & {
+      /**
+       * Data source name.
+       */
+      dataSource?: string,
+
+      /**
+       * Max pool size value for the [cube]<-->[db] pool.
+       */
+      maxPoolSize?: number,
+
+      /**
+       * Time to wait for a response from a connection after validation
+       * request before determining it as not valid. Default - 10000 ms.
+       */
+      testConnectionTimeout?: number,
+    } = {}
+  ) {
+    super({
+      testConnectionTimeout: config.testConnectionTimeout,
+    });
+
+    const dataSource =
+      config.dataSource ||
+      assertDataSource('default');
 
     this.options = {
-      scopes: ['https://www.googleapis.com/auth/bigquery', 'https://www.googleapis.com/auth/drive'],
-      projectId: process.env.CUBEJS_DB_BQ_PROJECT_ID,
-      keyFilename: process.env.CUBEJS_DB_BQ_KEY_FILE,
-      credentials: process.env.CUBEJS_DB_BQ_CREDENTIALS ?
-        JSON.parse(Buffer.from(process.env.CUBEJS_DB_BQ_CREDENTIALS, 'base64').toString('utf8')) :
-        undefined,
-      exportBucket: getEnv('dbExportBucket') || process.env.CUBEJS_DB_BQ_EXPORT_BUCKET,
-      location: getEnv('bigQueryLocation'),
+      scopes: [
+        'https://www.googleapis.com/auth/bigquery',
+        'https://www.googleapis.com/auth/drive',
+      ],
+      projectId: getEnv('bigqueryProjectId', { dataSource }),
+      keyFilename: getEnv('bigqueryKeyFile', { dataSource }),
+      credentials: getEnv('bigqueryCredentials', { dataSource })
+        ? JSON.parse(
+          Buffer.from(
+            getEnv('bigqueryCredentials', { dataSource }),
+            'base64',
+          ).toString('utf8')
+        )
+        : undefined,
+      exportBucket:
+        getEnv('dbExportBucket', { dataSource }) ||
+        getEnv('bigqueryExportBucket', { dataSource }),
+      location: getEnv('bigqueryLocation', { dataSource }),
       ...config,
-      pollTimeout: (config.pollTimeout || getEnv('dbPollTimeout') || getEnv('dbQueryTimeout')) * 1000,
-      pollMaxInterval: (config.pollMaxInterval || getEnv('dbPollMaxInterval')) * 1000,
+      pollTimeout: (
+        config.pollTimeout ||
+        getEnv('dbPollTimeout', { dataSource }) ||
+        getEnv('dbQueryTimeout', { dataSource })
+      ) * 1000,
+      pollMaxInterval: (
+        config.pollMaxInterval ||
+        getEnv('dbPollMaxInterval', { dataSource })
+      ) * 1000,
+      exportBucketCsvEscapeSymbol: getEnv('dbExportBucketCsvEscapeSymbol', { dataSource }),
     };
 
     getEnv('dbExportBucketType', {
+      dataSource,
       supported: ['gcp'],
     });
 
@@ -68,12 +138,19 @@ export class BigQueryDriver extends BaseDriver implements DriverInterface {
   }
 
   public static driverEnvVariables() {
-    return ['CUBEJS_DB_BQ_PROJECT_ID', 'CUBEJS_DB_BQ_KEY_FILE'];
+    // TODO (buntarb): check how this method can/must be used with split
+    // names by the data source.
+    return [
+      'CUBEJS_DB_BQ_PROJECT_ID',
+      'CUBEJS_DB_BQ_KEY_FILE',
+    ];
   }
 
   public async testConnection() {
     await this.bigquery.query({
-      query: 'SELECT ? AS number', params: ['1']
+      query: 'SELECT ? AS number',
+      params: ['1'],
+      jobTimeoutMs: this.testConnectionTimeout(),
     });
   }
 
@@ -117,7 +194,7 @@ export class BigQueryDriver extends BaseDriver implements DriverInterface {
 
       return [];
     } catch (e) {
-      if (e.message.includes('Permission bigquery.tables.get denied on table')) {
+      if ((<any>e).message.includes('Permission bigquery.tables.get denied on table')) {
         return {};
       }
 
@@ -143,7 +220,7 @@ export class BigQueryDriver extends BaseDriver implements DriverInterface {
       const [tables] = await this.bigquery.dataset(schemaName).getTables();
       return tables.map(t => ({ table_name: t.id }));
     } catch (e) {
-      if (e.toString().indexOf('Not found')) {
+      if ((<any>e).toString().indexOf('Not found')) {
         return [];
       }
       throw e;
@@ -156,8 +233,8 @@ export class BigQueryDriver extends BaseDriver implements DriverInterface {
     return bigQueryTable.schema.fields.map((c: any) => ({ name: c.name, type: this.toGenericType(c.type) }));
   }
 
-  public async createSchemaIfNotExists(schemaName: string) {
-    return this.bigquery.dataset(schemaName).get({ autoCreate: true });
+  public async createSchemaIfNotExists(schemaName: string): Promise<void> {
+    await this.bigquery.dataset(schemaName).get({ autoCreate: true });
   }
 
   public async isUnloadSupported() {
@@ -197,12 +274,15 @@ export class BigQueryDriver extends BaseDriver implements DriverInterface {
     const urls = await Promise.all(files.map(async file => {
       const [url] = await file.getSignedUrl({
         action: 'read',
-        expires: new Date(new Date().getTime() + 60 * 60 * 1000)
+        expires: new Date(new Date().getTime() + 60 * 60 * 1000),
       });
       return url;
     }));
 
-    return { csvFile: urls };
+    return {
+      exportBucketCsvEscapeSymbol: this.options.exportBucketCsvEscapeSymbol,
+      csvFile: urls,
+    };
   }
 
   public async loadPreAggregationIntoTable(

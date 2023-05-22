@@ -2,7 +2,6 @@ import dotenv from '@cubejs-backend/dotenv';
 
 import CubeCore, {
   CreateOptions as CoreCreateOptions,
-  CubejsServerCore,
   DatabaseType,
   DriverContext,
   DriverOptions,
@@ -49,7 +48,7 @@ type RequireOne<T, K extends keyof T> = {
 };
 
 export class CubejsServer {
-  protected readonly core: CubejsServerCore;
+  protected readonly core: CubeCore;
 
   protected readonly config: RequireOne<CreateOptions, 'webSockets' | 'http' | 'sqlPort' | 'pgSqlPort'>;
 
@@ -72,13 +71,17 @@ export class CubejsServer {
         ...config.http,
         cors: {
           allowedHeaders: 'authorization,content-type,x-request-id',
-          ...config.http?.cors
-        }
+          ...config.http?.cors,
+        },
       },
     };
 
-    this.core = CubeCore.create(config, systemOptions);
+    this.core = this.createCoreInstance(config, systemOptions);
     this.server = null;
+  }
+
+  protected createCoreInstance(config: CreateOptions, systemOptions?: SystemOptions): CubeCore {
+    return new CubeCore(config, systemOptions);
   }
 
   public async listen(options: http.ServerOptions = {}) {
@@ -127,7 +130,7 @@ export class CubejsServer {
         server: this.server,
         version
       };
-    } catch (e) {
+    } catch (e: any) {
       if (this.core.event) {
         await this.core.event('Dev Server Fatal Error', {
           error: (e.stack || e.message || e).toString()
@@ -175,7 +178,7 @@ export class CubejsServer {
       this.server = null;
 
       await this.core.releaseConnections();
-    } catch (e) {
+    } catch (e: any) {
       if (this.core.event) {
         await this.core.event('Dev Server Fatal Error', {
           error: (e.stack || e.message || e).toString()
@@ -186,6 +189,11 @@ export class CubejsServer {
     }
   }
 
+  /**
+   * Create driver instance.
+   *
+   * TODO (buntarb): there is no usage of this method across the project.
+   */
   public static createDriver(dbType: DatabaseType, opt: DriverOptions) {
     return CubeCore.createDriver(dbType, opt);
   }
@@ -245,7 +253,7 @@ export class CubejsServer {
       await timeoutKiller.cancel();
 
       return 0;
-    } catch (e) {
+    } catch (e: any) {
       console.error('Fatal error during server shutting down: ');
       console.error(e.stack || e);
 

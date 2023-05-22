@@ -1,7 +1,7 @@
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::panic;
-use std::process::Child;
+use std::process::{Child, ExitStatus};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,7 +13,7 @@ use ipc_channel::ipc::{IpcReceiver, IpcSender};
 use log::error;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tokio::runtime::Builder;
+use tokio::runtime::{Builder, Runtime};
 use tokio::sync::oneshot::Sender;
 use tokio::sync::{oneshot, watch, Notify, RwLock};
 use tracing::{instrument, Instrument};
@@ -111,6 +111,35 @@ impl<
     }
 }
 
+struct ProcessHandleGuard {
+    handle: Child,
+}
+
+impl ProcessHandleGuard {
+    pub fn new(handle: Child) -> Self {
+        Self { handle }
+    }
+    pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        self.handle.try_wait()
+    }
+    pub fn is_alive(&mut self) -> bool {
+        self.handle.try_wait().map_or(false, |r| r.is_none())
+    }
+    pub fn kill(&mut self) {
+        if let Err(e) = self.handle.kill() {
+            error!("Error during kill: {:?}", e);
+        }
+    }
+}
+
+impl Drop for ProcessHandleGuard {
+    fn drop(&mut self) {
+        if self.is_alive() {
+            self.kill();
+        }
+    }
+}
+
 pub struct WorkerProcess<
     T: Debug + Serialize + DeserializeOwned + Sync + Send + 'static,
     R: Serialize + DeserializeOwned + Sync + Send + 'static,
@@ -151,8 +180,8 @@ impl<
             let process = self.spawn_process();
 
             match process {
-                Ok((mut args_tx, mut res_rx, mut handle)) => {
-                    scopeguard::defer!(<WorkerProcess<T, R, P>>::kill(&mut handle));
+                Ok((mut args_tx, mut res_rx, handle)) => {
+                    let mut handle_guard = ProcessHandleGuard::new(handle);
                     loop {
                         let mut stopped_rx = self.stopped_rx.write().await;
                         let Message {
@@ -172,6 +201,35 @@ impl<
                                 message
                             }
                         };
+                        //Check if child process is killed
+                        match handle_guard.try_wait() {
+                            Ok(Some(_)) => {
+                                error!(
+                                    "Worker process is killed, reshedule message in another process"
+                                    );
+                                self.queue.push(Message {
+                                    message,
+                                    sender,
+                                    span,
+                                    dispatcher,
+                                });
+                                break;
+                            }
+                            Ok(None) => {}
+                            Err(_) => {
+                                error!(
+                                    "Can't read worker process status, reshedule message in another process"
+                                    );
+                                self.queue.push(Message {
+                                    message,
+                                    sender,
+                                    span,
+                                    dispatcher,
+                                });
+                                break;
+                            }
+                        }
+
                         let process_message_res_timeout = tokio::time::timeout(
                             self.timeout,
                             self.process_message(message, args_tx, res_rx),
@@ -211,12 +269,6 @@ impl<
                     error!("Can't start process: {}", e);
                 }
             }
-        }
-    }
-
-    fn kill(handle: &mut Child) {
-        if let Err(e) = handle.kill() {
-            error!("Error during kill: {:?}", e);
         }
     }
 
@@ -280,6 +332,7 @@ where
         tokio_builder.worker_threads(var.parse().unwrap());
     }
     let runtime = tokio_builder.build().unwrap();
+    worker_setup(&runtime);
     runtime.block_on(async move {
         let config = Config::default();
         config.configure_injector().await;
@@ -307,6 +360,24 @@ where
             }
         }
     })
+}
+
+fn worker_setup(runtime: &Runtime) {
+    let startup = SELECT_WORKER_SETUP.read().unwrap();
+    if startup.is_some() {
+        startup.as_ref().unwrap()(runtime);
+    }
+}
+
+lazy_static! {
+    static ref SELECT_WORKER_SETUP: std::sync::RwLock<Option<Box<dyn Fn(&Runtime) + Send + Sync>>> =
+        std::sync::RwLock::new(None);
+}
+
+pub fn register_select_worker_setup(f: fn(&Runtime)) {
+    let mut startup = SELECT_WORKER_SETUP.write().unwrap();
+    assert!(startup.is_none(), "select worker setup already registered");
+    *startup = Some(Box::new(f));
 }
 
 #[cfg(test)]

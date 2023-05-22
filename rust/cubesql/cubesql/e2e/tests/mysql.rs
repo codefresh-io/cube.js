@@ -51,7 +51,8 @@ impl MySqlIntegrationTestSuite {
                 c
             });
 
-            let services = config.configure().await;
+            config.configure().await;
+            let services = config.cube_services().await;
             services.wait_processing_loops().await.unwrap();
         });
 
@@ -211,15 +212,15 @@ impl AsyncTestSuite for MySqlIntegrationTestSuite {
         )
         .await?;
         self.test_execute_query(
-            "SELECT COUNT(*) count, status, createdAt FROM Orders GROUP BY status, createdAt ORDER BY createdAt".to_string(),
+            "SELECT COUNT(*) count, status, createdAt FROM Orders GROUP BY status, createdAt ORDER BY createdAt, status".to_string(),
         )
         .await?;
         self.test_execute_query(
-            "SELECT COUNT(*) count, status, DATE_TRUNC('month', createdAt) date FROM Orders GROUP BY status, DATE_TRUNC('month', createdAt) ORDER BY date".to_string(),
+            "SELECT COUNT(*) count, status, DATE_TRUNC('month', createdAt) date FROM Orders GROUP BY status, DATE_TRUNC('month', createdAt) ORDER BY date, status".to_string(),
         )
         .await?;
         self.test_execute_query(
-            "SELECT COUNT(*) count, status, DATE_TRUNC('quarter', createdAt) date FROM Orders GROUP BY status, DATE_TRUNC('quarter', createdAt) ORDER BY date".to_string(),
+            "SELECT COUNT(*) count, status, DATE_TRUNC('quarter', createdAt) date FROM Orders GROUP BY status, DATE_TRUNC('quarter', createdAt) ORDER BY date, status".to_string(),
         )
         .await?;
         self.test_execute_query(
