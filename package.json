@@ -73,7 +73,8 @@
   },
   "resolutions": {
     "@types/node": "^14",
-    "@types/ramda": "0.27.40"
+    "@types/ramda": "0.27.40",
+    "@cubejs-backend/shared": "@codefresh-io/cubejs-backend-shared"
   },
   "license": "MIT",
   "packageManager": "yarn@1.22.19"
