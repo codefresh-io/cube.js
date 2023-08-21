@@ -148,6 +148,8 @@ export class PreAggregations {
 
     const tableName = this.preAggregationTableName(cube, preAggregationName, preAggregation);
     const invalidateKeyQueries = this.query.preAggregationInvalidateKeyQueries(cube, preAggregation);
+    const queryForSqlEvaluation = this.query.preAggregationQueryForSqlEvaluation(cube, preAggregation);
+    const partitionInvalidateKeyQueries = queryForSqlEvaluation.partitionInvalidateKeyQueries && queryForSqlEvaluation.partitionInvalidateKeyQueries(cube, preAggregation);
 
     const matchedTimeDimension =
       preAggregation.partitionGranularity &&
@@ -160,11 +162,10 @@ export class PreAggregations {
         td.isDateOperator() &&
         td.camelizeOperator === 'inDateRange' // TODO support all date operators
     );
-    const queryForSqlEvaluation = this.query.preAggregationQueryForSqlEvaluation(cube, preAggregation);
 
     const uniqueKeyColumnsDefault = () => null;
     const uniqueKeyColumns = ({
-      rollup: () => this.query.preAggregationQueryForSqlEvaluation(cube, preAggregation).dimensionColumns(),
+      rollup: () => queryForSqlEvaluation.dimensionColumns(),
       originalSql: () => preAggregation.uniqueKeyColumns || null
     }[preAggregation.type] || uniqueKeyColumnsDefault)();
 
@@ -176,18 +177,21 @@ export class PreAggregations {
       timestampFormat: queryForSqlEvaluation.timestampFormat(),
       tableName,
       invalidateKeyQueries,
+      partitionInvalidateKeyQueries,
       type: preAggregation.type,
       external: preAggregation.external,
-      previewSql: this.query.preAggregationPreviewSql(tableName),
-      preAggregationsSchema: this.query.preAggregationSchema(),
-      loadSql: this.query.preAggregationLoadSql(cube, preAggregation, tableName),
-      sql: this.query.preAggregationSql(cube, preAggregation),
+      previewSql: queryForSqlEvaluation.preAggregationPreviewSql(tableName),
+      preAggregationsSchema: queryForSqlEvaluation.preAggregationSchema(),
+      loadSql: queryForSqlEvaluation.preAggregationLoadSql(cube, preAggregation, tableName),
+      sql: queryForSqlEvaluation.preAggregationSql(cube, preAggregation),
       uniqueKeyColumns,
       aggregationsColumns,
       dataSource: queryForSqlEvaluation.dataSource,
       // in fact we can reference preAggregation.granularity however accessing timeDimensions is more strict and consistent
       granularity: references.timeDimensions[0]?.granularity,
       partitionGranularity: preAggregation.partitionGranularity,
+      updateWindowSeconds: preAggregation.refreshKey && preAggregation.refreshKey.updateWindow &&
+        queryForSqlEvaluation.parseSecondDuration(preAggregation.refreshKey.updateWindow),
       preAggregationStartEndQueries:
         (preAggregation.partitionGranularity || references.timeDimensions[0]?.granularity) &&
         this.refreshRangeQuery().preAggregationStartEndQueries(cube, preAggregation),
@@ -204,7 +208,7 @@ export class PreAggregations {
             const indexName = this.preAggregationTableName(cube, `${foundPreAggregation.sqlAlias || preAggregationName}_${index}`, preAggregation, true);
             return {
               indexName,
-              sql: this.query.indexSql(
+              sql: queryForSqlEvaluation.indexSql(
                 cube,
                 preAggregation,
                 preAggregation.indexes[index],
@@ -222,12 +226,15 @@ export class PreAggregations {
             return {
               indexName,
               type: preAggregation.indexes[index].type,
-              columns: this.query.evaluateIndexColumns(cube, preAggregation.indexes[index])
+              columns: queryForSqlEvaluation.evaluateIndexColumns(cube, preAggregation.indexes[index])
             };
           }
         ),
-      readOnly: preAggregation.readOnly || this.query.preAggregationReadOnly(cube, preAggregation),
+      readOnly: preAggregation.readOnly || queryForSqlEvaluation.preAggregationReadOnly(cube, preAggregation),
+      streamOffset: preAggregation.streamOffset,
       unionWithSourceData: preAggregation.unionWithSourceData,
+      rollupLambdaId: preAggregation.rollupLambdaId,
+      lastRollupLambda: preAggregation.lastRollupLambda,
     };
   }
 
@@ -252,7 +259,7 @@ export class PreAggregations {
         preAggregationName,
         preAggregation,
         cube,
-        references: this.evaluateAllReferences(cube, preAggregation)
+        references: this.evaluateAllReferences(cube, preAggregation, preAggregationName)
       };
     }
     return null;
@@ -265,7 +272,22 @@ export class PreAggregations {
     const collectLeafMeasures = query.collectLeafMeasures.bind(query);
     const dimensionsList = query.dimensions.map(dim => dim.dimension);
     const segmentsList = query.segments.map(s => s.segment);
-    
+    const ownedDimensions = PreAggregations.ownedMembers(query, PreAggregations.concatDimensionMembers(query));
+    const ownedTimeDimensions = query.timeDimensions.map(td => {
+      const owned = PreAggregations.ownedMembers(query, [td]);
+      let { dimension } = td;
+      // TODO If there's more than one owned time dimension for the given input time dimension then it's some
+      // TODO kind of calculation which isn't supported yet
+      if (owned.length === 1) {
+        [dimension] = owned;
+      }
+      return query.newTimeDimension({
+        dimension,
+        dateRange: td.dateRange,
+        granularity: td.granularity,
+      });
+    }).map(d => query.newTimeDimension(d));
+
     const measureToLeafMeasures = {};
 
     const leafMeasurePaths =
@@ -288,13 +310,6 @@ export class PreAggregations {
         R.uniq
       )(measures);
 
-    function sortTimeDimensions(timeDimensions) {
-      return timeDimensions && R.sortBy(
-        R.prop(0),
-        timeDimensions.map(d => [d.dimension, d.rollupGranularity()])
-      ) || [];
-    }
-
     function allValuesEq1(map) {
       if (!map) return false;
       // eslint-disable-next-line no-restricted-syntax
@@ -304,11 +319,10 @@ export class PreAggregations {
       return true;
     }
 
-    const sortedTimeDimensions = sortTimeDimensions(query.timeDimensions);
-    const timeDimensions = query.timeDimensions && R.sortBy(
-      R.prop(0),
-      query.timeDimensions.map(d => [d.dimension, d.granularity])
-    ) || [];
+    const sortedTimeDimensions = PreAggregations.sortTimeDimensionsWithRollupGranularity(query.timeDimensions);
+    const timeDimensions = PreAggregations.timeDimensionsAsIs(query.timeDimensions);
+    const ownedTimeDimensionsWithRollupGranularity = PreAggregations.sortTimeDimensionsWithRollupGranularity(ownedTimeDimensions);
+    const ownedTimeDimensionsAsIs = PreAggregations.timeDimensionsAsIs(ownedTimeDimensions);
 
     const hasNoTimeDimensionsWithoutGranularity = !query.timeDimensions.filter(d => !d.granularity).length;
 
@@ -334,9 +348,8 @@ export class PreAggregations {
       dimensionsList.concat(segmentsList).reduce((map, d) => map.set(d, 1), new Map())
     );
 
-    filterDimensionsSingleValueEqual = new Set(
-      allValuesEq1(filterDimensionsSingleValueEqual) ? filterDimensionsSingleValueEqual?.keys() : null
-    );
+    filterDimensionsSingleValueEqual =
+      allValuesEq1(filterDimensionsSingleValueEqual) ? new Set(filterDimensionsSingleValueEqual?.keys()) : null;
 
     return {
       sortedDimensions,
@@ -353,8 +366,33 @@ export class PreAggregations {
       hasMultipliedMeasures,
       hasCumulativeMeasures,
       windowGranularity,
-      filterDimensionsSingleValueEqual
+      filterDimensionsSingleValueEqual,
+      ownedDimensions,
+      ownedTimeDimensionsWithRollupGranularity,
+      ownedTimeDimensionsAsIs
     };
+  }
+
+  static ownedMembers(query, members) {
+    return R.pipe(R.uniq, R.sortBy(R.identity))(
+      query
+        .collectFrom(members, query.collectMemberNamesFor.bind(query), 'collectMemberNamesFor')
+        .filter(d => query.cubeEvaluator.byPathAnyType(d).ownedByCube)
+    );
+  }
+
+  static sortTimeDimensionsWithRollupGranularity(timeDimensions) {
+    return timeDimensions && R.sortBy(
+      R.prop(0),
+      timeDimensions.map(d => [d.dimension, d.rollupGranularity()])
+    ) || [];
+  }
+
+  static timeDimensionsAsIs(timeDimensions) {
+    return timeDimensions && R.sortBy(
+      R.prop(0),
+      timeDimensions.map(d => [d.dimension, d.granularity]),
+    ) || [];
   }
 
   static collectFilterDimensionsWithSingleValueEqual(filters, map) {
@@ -439,13 +477,13 @@ export class PreAggregations {
      * @type {Set<string>}
      */
     const filterDimensionsSingleValueEqual =
-      transformedQuery.filterDimensionsSingleValueEqual instanceof Set
+      transformedQuery.filterDimensionsSingleValueEqual && (transformedQuery.filterDimensionsSingleValueEqual instanceof Set
         ? transformedQuery.filterDimensionsSingleValueEqual
         : new Set(
           Object.keys(
             transformedQuery.filterDimensionsSingleValueEqual || {},
           )
-        );
+        ));
 
     /**
      * Determine whether pre-aggregation can be used or not.
@@ -471,8 +509,11 @@ export class PreAggregations {
         transformedQuery.isAdditive ||
         R.equals(transformedQuery.timeDimensions, refTimeDimensions)
       ) && (
+        filterDimensionsSingleValueEqual &&
         references.dimensions.length === filterDimensionsSingleValueEqual.size &&
-        R.all(d => filterDimensionsSingleValueEqual.has(d), references.dimensions)
+        R.all(d => filterDimensionsSingleValueEqual.has(d), references.dimensions) ||
+        transformedQuery.allFiltersWithinSelectedDimensions &&
+        R.equals(references.sortedDimensions || references.dimensions, transformedQuery.sortedDimensions)
       ) && (
         R.all(m => references.measures.indexOf(m) !== -1, transformedQuery.measures) ||
         R.all(m => references.measures.indexOf(m) !== -1, transformedQuery.leafMeasures)
@@ -539,6 +580,27 @@ export class PreAggregations {
         ? transformedQuery.timeDimensions.map(expandTimeDimension)
         : transformedQuery.sortedTimeDimensions.map(expandTimeDimension);
 
+      const ownedQueryTimeDimensionsList = references.allowNonStrictDateRangeMatch
+        ? transformedQuery.ownedTimeDimensionsAsIs.map(expandTimeDimension)
+        : transformedQuery.ownedTimeDimensionsWithRollupGranularity.map(expandTimeDimension);
+
+      const dimensionsMatch = (dimensions) => R.all(
+        d => (
+          references.sortedDimensions ||
+          references.dimensions
+        ).indexOf(d) !== -1,
+        dimensions
+      );
+
+      const timeDimensionsMatch = (timeDimensionsList) => R.allPass(
+        timeDimensionsList.map(
+          tds => R.anyPass(tds.map(td => R.contains(td)))
+        )
+      )(
+        references.sortedTimeDimensions ||
+        sortTimeDimensions(references.timeDimensions)
+      );
+
       return ((
         windowGranularityMatches(references)
       ) && (
@@ -547,22 +609,8 @@ export class PreAggregations {
           transformedQuery.leafMeasures,
         )
       ) && (
-        R.all(
-          d => (
-            references.sortedDimensions ||
-            references.dimensions
-          ).indexOf(d) !== -1,
-          transformedQuery.sortedDimensions
-        )
-      ) && (
-        R.allPass(
-          queryTimeDimensionsList.map(
-            tds => R.anyPass(tds.map(td => R.contains(td)))
-          )
-        )(
-          references.sortedTimeDimensions ||
-          sortTimeDimensions(references.timeDimensions)
-        )
+        dimensionsMatch(transformedQuery.sortedDimensions) && timeDimensionsMatch(queryTimeDimensionsList) ||
+        dimensionsMatch(transformedQuery.ownedDimensions) && timeDimensionsMatch(ownedQueryTimeDimensionsList)
       ));
     };
 
@@ -590,6 +638,10 @@ export class PreAggregations {
     );
   }
 
+  static concatDimensionMembers(query) {
+    return query.dimensions.concat(query.filters).concat(query.segments);
+  }
+
   // eslint-disable-next-line no-unused-vars
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   getCubeLattice(cube, preAggregationName, preAggregation) {
@@ -608,7 +660,8 @@ export class PreAggregations {
       this.preAggregationForQuery =
         this
           .rollupMatchResults()
-          .find(p => p.canUsePreAggregation);
+          // Refresh worker can access specific pre-aggregations even in case those hidden by others
+          .find(p => p.canUsePreAggregation && (!this.query.options.preAggregationId || p.preAggregationId === this.query.options.preAggregationId));
     }
     return this.preAggregationForQuery;
   }
@@ -694,9 +747,11 @@ export class PreAggregations {
       ['buildRollupJoin', JSON.stringify(preAggObj), JSON.stringify(preAggObjsToJoin)],
       () => {
         const targetJoins = this.resolveJoinMembers(
+          // TODO join hints?
           this.query.joinGraph.buildJoin(this.cubesFromPreAggregation(preAggObj))
         );
         const existingJoins = R.unnest(preAggObjsToJoin.map(
+          // TODO join hints?
           p => this.resolveJoinMembers(this.query.joinGraph.buildJoin(this.cubesFromPreAggregation(p)))
         ));
         const nonExistingJoins = targetJoins.filter(target => !existingJoins.find(
@@ -761,19 +816,20 @@ export class PreAggregations {
   cubesFromPreAggregation(preAggObj) {
     return R.uniq(
       preAggObj.references.measures.map(m => this.query.cubeEvaluator.parsePath('measures', m)).concat(
-        preAggObj.references.dimensions.map(m => this.query.cubeEvaluator.parsePath('dimensions', m))
+        preAggObj.references.dimensions.map(m => this.query.cubeEvaluator.parsePathAnyType(m))
       ).map(p => p[0])
     );
   }
 
   evaluatedPreAggregationObj(cube, preAggregationName, preAggregation, canUsePreAggregation) {
-    const references = this.evaluateAllReferences(cube, preAggregation);
+    const references = this.evaluateAllReferences(cube, preAggregation, preAggregationName);
     const preAggObj = {
       preAggregationName,
       preAggregation,
       cube,
       canUsePreAggregation: canUsePreAggregation(references),
-      references
+      references,
+      preAggregationId: `${cube}.${preAggregationName}`
     };
 
     if (preAggregation.type === 'rollupJoin') {
@@ -810,17 +866,28 @@ export class PreAggregations {
       if (referencedPreAggregations.length === 0) {
         throw new UserError(`rollupLambda '${cube}.${preAggregationName}' should reference at least on rollup`);
       }
-      if (referencedPreAggregations.length > 1) {
-        throw new UserError(`rollupLambda '${cube}.${preAggregationName}' references multiple rollups. This feature is currently in early access preview. Please get in touch with us to get access to it: https://cube.dev/contact.`);
-      }
-      referencedPreAggregations[referencedPreAggregations.length - 1] = {
-        ...referencedPreAggregations[referencedPreAggregations.length - 1],
-        preAggregation: {
-          ...referencedPreAggregations[referencedPreAggregations.length - 1].preAggregation,
-          unionWithSourceData: preAggObj.preAggregation.unionWithSourceData,
+      referencedPreAggregations.forEach((referencedPreAggregation, i) => {
+        if (i === referencedPreAggregations.length - 1 && preAggObj.preAggregation.unionWithSourceData && preAggObj.cube !== referencedPreAggregations[i].cube) {
+          throw new UserError(`unionWithSourceData can be enabled only for pre-aggregation within '${preAggObj.cube}' cube but '${referencedPreAggregations[i].preAggregationName}' pre-aggregation is defined within '${referencedPreAggregations[i].cube}' cube`);
         }
-      };
-      referencedPreAggregations.forEach(referencedPreAggregation => {
+        referencedPreAggregations[i] = {
+          ...referencedPreAggregations[i],
+          preAggregation: {
+            ...referencedPreAggregations[i].preAggregation,
+            unionWithSourceData: i === referencedPreAggregations.length - 1 ? preAggObj.preAggregation.unionWithSourceData : false,
+            rollupLambdaId: `${cube}.${preAggregationName}`,
+            lastRollupLambda: i === referencedPreAggregations.length - 1,
+          }
+        };
+        if (i > 0) {
+          const partitionGranularity = PreAggregations.checkPartitionGranularityDefined(cube, preAggregationName, referencedPreAggregations[i]);
+          const prevReferencedPreAggregation = referencedPreAggregations[i - 1];
+          const partitionGranularityPrev = PreAggregations.checkPartitionGranularityDefined(cube, preAggregationName, prevReferencedPreAggregation);
+          const minGranularity = this.query.minGranularity(partitionGranularityPrev, partitionGranularity);
+          if (minGranularity !== partitionGranularity) {
+            throw new UserError(`'${prevReferencedPreAggregation.cube}.${prevReferencedPreAggregation.preAggregationName}' and '${referencedPreAggregation.cube}.${referencedPreAggregation.preAggregationName}' referenced by '${cube}.${preAggregationName}' rollupLambda have incompatible partition granularities. '${partitionGranularityPrev}' can't be padded by '${partitionGranularity}'`);
+          }
+        }
         PreAggregations.memberNameMismatchValidation(preAggObj, referencedPreAggregation, 'measures');
         PreAggregations.memberNameMismatchValidation(preAggObj, referencedPreAggregation, 'dimensions');
         PreAggregations.memberNameMismatchValidation(preAggObj, referencedPreAggregation, 'timeDimensions');
@@ -834,6 +901,13 @@ export class PreAggregations {
     }
   }
 
+  static checkPartitionGranularityDefined(cube, preAggregationName, preAggregation) {
+    if (!preAggregation.preAggregation.partitionGranularity) {
+      throw new UserError(`'${preAggregation.cube}.${preAggregation.preAggregationName}' referenced by '${cube}.${preAggregationName}' rollupLambda doesn't have partition granularity. Partition granularity is required if multiple rollups are provided.`);
+    }
+    return preAggregation.preAggregation.partitionGranularity;
+  }
+
   static memberNameMismatchValidation(preAggA, preAggB, memberType) {
     const preAggAMemberNames = PreAggregations.memberShortNames(preAggA.references[memberType], memberType === 'timeDimensions');
     const preAggBMemberNames = PreAggregations.memberShortNames(preAggB.references[memberType], memberType === 'timeDimensions');
@@ -841,12 +915,12 @@ export class PreAggregations {
       preAggAMemberNames,
       preAggBMemberNames
     )) {
-      throw new UserError(`Names for ${memberType} doesn't match between '${preAggA.cube}.${preAggA.preAggregationName}' and '${preAggB.cube}.${preAggB.preAggregationName}': ${JSON.stringify(preAggAMemberNames)} != ${JSON.stringify(preAggBMemberNames)}`);
+      throw new UserError(`Names for ${memberType} doesn't match between '${preAggA.cube}.${preAggA.preAggregationName}' and '${preAggB.cube}.${preAggB.preAggregationName}': ${JSON.stringify(preAggAMemberNames)} does not equal to ${JSON.stringify(preAggBMemberNames)}`);
     }
   }
 
   static memberShortNames(memberArray, isTimeDimension) {
-    return memberArray.map(member => (isTimeDimension ? member.dimension.split('.')[1] : member.split('.')[1]));
+    return memberArray.map(member => (isTimeDimension ? `${member.dimension.split('.')[1]}.${member.granularity}` : member.split('.')[1]));
   }
 
   rollupMatchResultDescriptions() {
@@ -887,6 +961,7 @@ export class PreAggregations {
   refreshRangeQuery() {
     return this.query.newSubQuery({
       rowLimit: null,
+      offset: null,
       preAggregationQuery: true,
     });
   }
@@ -896,6 +971,7 @@ export class PreAggregations {
       cube,
       {
         rowLimit: null,
+        offset: null,
         timeDimensions: aggregation.partitionTimeDimensions,
         preAggregationQuery: true,
       }
@@ -904,15 +980,19 @@ export class PreAggregations {
 
   rollupPreAggregationQuery(cube, aggregation) {
     const references = this.evaluateAllReferences(cube, aggregation);
+    const cubeQuery = this.query.newSubQueryForCube(cube, {});
     return this.query.newSubQueryForCube(
       cube,
       {
         rowLimit: null,
+        offset: null,
         measures: references.measures,
         dimensions: references.dimensions,
         timeDimensions: this.mergePartitionTimeDimensions(references, aggregation.partitionTimeDimensions),
         preAggregationQuery: true,
         useOriginalSqlPreAggregationsInPreAggregation: aggregation.useOriginalSqlPreAggregations,
+        ungrouped: cubeQuery.preAggregationAllowUngroupingWithPrimaryKey(cube, aggregation) &&
+          !!references.dimensions.find(d => this.query.cubeEvaluator.dimensionByPath(d).primaryKey)
       }
     );
   }
@@ -922,6 +1002,7 @@ export class PreAggregations {
       cube,
       {
         rowLimit: null,
+        offset: null,
         measures: aggregation.measures,
         dimensions: aggregation.dimensions,
         timeDimensions:
@@ -956,24 +1037,30 @@ export class PreAggregations {
       .toLowerCase();
   }
 
-  evaluateAllReferences(cube, aggregation) {
-    const references = this.query.cubeEvaluator.evaluatePreAggregationReferences(cube, aggregation);
-    if (aggregation.type === 'rollupLambda') {
-      if (references.rollups.length > 0) {
-        const [firstLambdaCube] = this.query.cubeEvaluator.parsePath('preAggregations', references.rollups[0]);
-        const firstLambdaPreAggregation = this.query.cubeEvaluator.byPath('preAggregations', references.rollups[0]);
-        const firstLambdaReferences = this.query.cubeEvaluator.evaluatePreAggregationReferences(firstLambdaCube, firstLambdaPreAggregation);
+  evaluateAllReferences(cube, aggregation, preAggregationName) {
+    const evaluateReferences = () => {
+      const references = this.query.cubeEvaluator.evaluatePreAggregationReferences(cube, aggregation);
+      if (aggregation.type === 'rollupLambda') {
+        if (references.rollups.length > 0) {
+          const [firstLambdaCube] = this.query.cubeEvaluator.parsePath('preAggregations', references.rollups[0]);
+          const firstLambdaPreAggregation = this.query.cubeEvaluator.byPath('preAggregations', references.rollups[0]);
+          const firstLambdaReferences = this.query.cubeEvaluator.evaluatePreAggregationReferences(firstLambdaCube, firstLambdaPreAggregation);
 
-        if (references.measures.length === 0 &&
-          references.dimensions.length === 0 &&
-          references.timeDimensions.length === 0) {
-          return { ...firstLambdaReferences, rollups: references.rollups };
-        } else {
-          return references;
+          if (references.measures.length === 0 &&
+            references.dimensions.length === 0 &&
+            references.timeDimensions.length === 0) {
+            return { ...firstLambdaReferences, rollups: references.rollups };
+          } else {
+            return references;
+          }
         }
       }
+      return references;
+    };
+    if (!preAggregationName) {
+      return evaluateReferences();
     }
-    return references;
+    return this.query.cacheValue(['evaluateAllReferences', cube, preAggregationName], evaluateReferences);
   }
 
   originalSqlPreAggregationTable(preAggregationDescription) {
@@ -991,12 +1078,55 @@ export class PreAggregations {
     );
   }
 
+  rollupLambdaUnion(preAggregationForQuery, rollupGranularity) {
+    if (!preAggregationForQuery.referencedPreAggregations) {
+      return this.preAggregationTableName(
+        preAggregationForQuery.cube,
+        preAggregationForQuery.preAggregationName,
+        preAggregationForQuery.preAggregation
+      );
+    }
+
+    const targetDimensionsReferences = this.dimensionsRenderedReference(preAggregationForQuery);
+    const targetTimeDimensionsReferences = this.timeDimensionsRenderedReference(rollupGranularity, preAggregationForQuery);
+    const targetMeasuresReferences = this.measureAliasesRenderedReference(preAggregationForQuery);
+
+    const columnsFor = (targetReferences, references, preAggregation) => Object.keys(targetReferences).map(
+      member => `${references[this.query.cubeEvaluator.pathFromArray([preAggregation.cube, member.split('.')[1]])]} ${targetReferences[member]}`
+    );
+
+    const tables = preAggregationForQuery.referencedPreAggregations.map(preAggregation => {
+      const dimensionsReferences = this.dimensionsRenderedReference(preAggregation);
+      const timeDimensionsReferences = this.timeDimensionsRenderedReference(rollupGranularity, preAggregation);
+      const measuresReferences = this.measureAliasesRenderedReference(preAggregation);
+
+      return {
+        tableName: this.preAggregationTableName(
+          preAggregation.cube,
+          preAggregation.preAggregationName,
+          preAggregation.preAggregation
+        ),
+        columns: columnsFor(targetDimensionsReferences, dimensionsReferences, preAggregation)
+          .concat(columnsFor(targetTimeDimensionsReferences, timeDimensionsReferences, preAggregation))
+          .concat(columnsFor(targetMeasuresReferences, measuresReferences, preAggregation))
+      };
+    });
+    if (tables.length === 1) {
+      return tables[0].tableName;
+    }
+    const union = tables.map(table => `SELECT ${table.columns.join(', ')} FROM ${table.tableName}`).join(' UNION ALL ');
+    return `(${union})`;
+  }
+
   rollupPreAggregation(preAggregationForQuery, measures, isFullSimpleQuery, filters) {
     let toJoin;
+    // TODO granularity shouldn't be null?
+    const rollupGranularity = preAggregationForQuery.references.timeDimensions[0]?.granularity || 'day';
 
     const sqlAndAlias = (preAgg) => ({
       preAggregation: preAgg,
-      alias: this.query.cubeAlias(this.query.cubeEvaluator.pathFromArray([preAgg.cube, preAgg.preAggregationName]))
+      alias: this.query.cubeAlias(this.query.cubeEvaluator.pathFromArray([preAgg.cube, preAgg.preAggregationName])),
+      sql: this.rollupLambdaUnion(preAgg, rollupGranularity)
     });
 
     if (preAggregationForQuery.preAggregation.type === 'rollupJoin') {
@@ -1021,25 +1151,12 @@ export class PreAggregations {
         )
       ];
     } else if (preAggregationForQuery.preAggregation.type === 'rollupLambda') {
-      const lambdaPreAggregations = preAggregationForQuery.referencedPreAggregations;
-
-      // TODO support lambda union of rollups
-      toJoin = [sqlAndAlias(lambdaPreAggregations[0])];
+      toJoin = [sqlAndAlias(preAggregationForQuery)];
     } else {
       toJoin = [sqlAndAlias(preAggregationForQuery)];
     }
 
-    const from = this.query.joinSql(
-      toJoin.map(j => ({
-        ...j,
-        sql:
-          this.query.preAggregationTableName(
-            j.preAggregation.cube,
-            // @todo Dont use sqlAlias directly, we needed to move it in preAggregationTableName
-            j.preAggregation.preAggregation.sqlAlias || j.preAggregation.preAggregationName
-          )
-      }))
-    );
+    const from = this.query.joinSql(toJoin);
 
     const segmentFilters = this.query.segments.map(
       s => this.query.newFilter({ dimension: s.segment, operator: 'equals', values: [true] })
@@ -1056,24 +1173,11 @@ export class PreAggregations {
           }))
         ).filter(f => !!f);
 
-    const renderedReference = R.pipe(
-      R.map(path => {
-        const measure = this.query.newMeasure(path);
-        return [
-          path,
-          this.query.aggregateOnGroupedColumn(
-            measure.measureDefinition(),
-            measure.aliasName(),
-            !this.query.safeEvaluateSymbolContext().overTimeSeriesAggregate,
-            path
-          ) || `sum(${measure.aliasName()})`
-        ];
-      }),
-      R.fromPairs
-    )(this.rollupMeasures(preAggregationForQuery));
-
-    // TODO granularity shouldn't be null?
-    const rollupGranularity = preAggregationForQuery.references.timeDimensions[0]?.granularity || 'day';
+    const renderedReference = {
+      ...(this.measuresRenderedReference(preAggregationForQuery)),
+      ...(this.dimensionsRenderedReference(preAggregationForQuery)),
+      ...(this.timeDimensionsRenderedReference(rollupGranularity, preAggregationForQuery)),
+    };
 
     return this.query.evaluateSymbolSqlWithContext(
       // eslint-disable-next-line prefer-template
@@ -1093,10 +1197,79 @@ export class PreAggregations {
     );
   }
 
-  rollupMeasures(preAggregationForQuery) {
+  measuresRenderedReference(preAggregationForQuery) {
+    return R.pipe(
+      R.map(path => {
+        const measure = this.query.newMeasure(path);
+        return [
+          path,
+          this.query.aggregateOnGroupedColumn(
+            measure.measureDefinition(),
+            measure.aliasName(),
+            !this.query.safeEvaluateSymbolContext().overTimeSeriesAggregate,
+            path,
+          ) || `sum(${measure.aliasName()})`,
+        ];
+      }),
+      R.fromPairs,
+    )(this.rollupMeasures(preAggregationForQuery));
+  }
+
+  measureAliasesRenderedReference(preAggregationForQuery) {
+    return R.pipe(
+      R.map(path => {
+        const measure = this.query.newMeasure(path);
+        return [
+          path,
+          measure.aliasName(),
+        ];
+      }),
+      R.fromPairs,
+    )(this.rollupMeasures(preAggregationForQuery));
+  }
+
+  dimensionsRenderedReference(preAggregationForQuery) {
+    return R.pipe(
+      R.map(path => {
+        const dimension = this.query.newDimension(path);
+        return [
+          path,
+          this.query.escapeColumnName(dimension.unescapedAliasName()),
+        ];
+      }),
+      R.fromPairs,
+    )(this.rollupDimensions(preAggregationForQuery));
+  }
+
+  timeDimensionsRenderedReference(rollupGranularity, preAggregationForQuery) {
+    return R.pipe(
+      R.map((td) => {
+        const timeDimension = this.query.newTimeDimension(td);
+        return [
+          td.dimension,
+          this.query.escapeColumnName(timeDimension.unescapedAliasName(rollupGranularity)),
+        ];
+      }),
+      R.fromPairs,
+    )(this.rollupTimeDimensions(preAggregationForQuery));
+  }
+
+  rollupMembers(preAggregationForQuery, type) {
     return preAggregationForQuery.preAggregation.type === 'autoRollup' ?
-      preAggregationForQuery.preAggregation.measures :
-      this.evaluateAllReferences(preAggregationForQuery.cube, preAggregationForQuery.preAggregation).measures;
+      preAggregationForQuery.preAggregation[type] :
+      this.evaluateAllReferences(preAggregationForQuery.cube, preAggregationForQuery.preAggregation, preAggregationForQuery.preAggregationName)[type];
+  }
+
+  rollupMeasures(preAggregationForQuery) {
+    return this.rollupMembers(preAggregationForQuery, 'measures');
+  }
+
+  rollupDimensions(preAggregationForQuery) {
+    return this.rollupMembers(preAggregationForQuery, 'dimensions');
+  }
+
+  rollupTimeDimensions(preAggregationForQuery) {
+    return this.rollupMembers(preAggregationForQuery, 'timeDimensions');
   }
 
   preAggregationId(preAggregation) {

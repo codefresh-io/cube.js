@@ -1,3 +1,13 @@
+/**
+ * @copyright Cube Dev, Inc.
+ * @license Apache-2.0
+ * @fileoverview The `QuestDriver` and related types declaration.
+ */
+
+import {
+  getEnv,
+  assertDataSource,
+} from '@cubejs-backend/shared';
 import { types, Pool, PoolConfig, FieldDef } from 'pg';
 // eslint-disable-next-line import/no-extraneous-dependencies
 import { TypeId, TypeFormat } from 'pg-types';
@@ -21,9 +31,11 @@ const timestampTypeParser = (val: string) => moment.utc(val).format(moment.HTML5
 
 export type QuestDriverConfiguration = Partial<PoolConfig> & {
   readOnly?: boolean,
-  maxPoolSize?: number,
 };
 
+/**
+ * Quest driver class.
+ */
 export class QuestDriver<Config extends QuestDriverConfiguration = QuestDriverConfiguration>
   extends BaseDriver implements DriverInterface {
   private readonly pool: Pool;
@@ -41,28 +53,54 @@ export class QuestDriver<Config extends QuestDriverConfiguration = QuestDriverCo
     return 2;
   }
 
+  /**
+   * Class constructor.
+   */
   public constructor(
-    config: Partial<Config> = {}
+    config: QuestDriverConfiguration & {
+      /**
+       * Data source name.
+       */
+      dataSource?: string,
+
+      /**
+       * Max pool size value for the [cube]<-->[db] pool.
+       */
+      maxPoolSize?: number,
+
+      /**
+       * Time to wait for a response from a connection after validation
+       * request before determining it as not valid. Default - 10000 ms.
+       */
+      testConnectionTimeout?: number,
+    } = {}
   ) {
-    super();
+    super({
+      testConnectionTimeout: config.testConnectionTimeout,
+    });
+
+    const dataSource =
+      config.dataSource ||
+      assertDataSource('default');
 
     this.pool = new Pool({
-      max:
-        process.env.CUBEJS_DB_MAX_POOL && parseInt(process.env.CUBEJS_DB_MAX_POOL, 10) ||
-        config.maxPoolSize || 4,
       idleTimeoutMillis: 30_000,
-      host: process.env.CUBEJS_DB_HOST,
-      database: process.env.CUBEJS_DB_NAME,
-      port: <any>process.env.CUBEJS_DB_PORT,
-      user: process.env.CUBEJS_DB_USER,
-      password: process.env.CUBEJS_DB_PASS,
+      max:
+        config.maxPoolSize ||
+        getEnv('dbMaxPoolSize', { dataSource }) ||
+        4,
+      host: getEnv('dbHost', { dataSource }),
+      database: getEnv('dbName', { dataSource }),
+      port: getEnv('dbPort', { dataSource }),
+      user: getEnv('dbUser', { dataSource }),
+      password: getEnv('dbPass', { dataSource }),
+      ssl: this.getSslOptions(dataSource),
       ...config
     });
     this.pool.on('error', (err) => {
       console.log(`Unexpected error on idle client: ${err.stack || err}`);
     });
-
-    this.config = {
+    this.config = <Partial<Config>>{
       ...this.getInitialConfiguration(),
       ...config,
     };

@@ -1,6 +1,7 @@
 import R from 'ramda';
 import moment from 'moment';
-import Joi from '@hapi/joi';
+import Joi from 'joi';
+import { getEnv } from '@cubejs-backend/shared';
 
 import { UserError } from './UserError';
 import { dateParser } from './dateParser';
@@ -44,9 +45,11 @@ const operators = [
   'equals',
   'notEquals',
   'contains',
-  'startsWith',
-  'endsWith',
   'notContains',
+  'startsWith',
+  'notStartsWith',
+  'endsWith',
+  'notEndsWith',
   'in',
   'notIn',
   'gt',
@@ -66,13 +69,13 @@ const operators = [
 const oneFilter = Joi.object().keys({
   dimension: id,
   member: id,
-  operator: Joi.valid(operators).required(),
-  values: Joi.array().items(Joi.string().allow('', null), Joi.lazy(() => oneFilter))
+  operator: Joi.valid(...operators).required(),
+  values: Joi.array().items(Joi.string().allow('', null), Joi.link('...'), Joi.number(), Joi.boolean())
 }).xor('dimension', 'member');
 
 const oneCondition = Joi.object().keys({
-  or: Joi.array().items(oneFilter, Joi.lazy(() => oneCondition).description('oneCondition schema')),
-  and: Joi.array().items(oneFilter, Joi.lazy(() => oneCondition).description('oneCondition schema')),
+  or: Joi.array().items(oneFilter, Joi.link('...').description('oneCondition schema')),
+  and: Joi.array().items(oneFilter, Joi.link('...').description('oneCondition schema')),
 }).xor('or', 'and');
 
 const querySchema = Joi.object().keys({
@@ -94,7 +97,7 @@ const querySchema = Joi.object().keys({
   ),
   segments: Joi.array().items(id),
   timezone: Joi.string(),
-  limit: Joi.number().integer().min(1).max(50000),
+  limit: Joi.number().integer().min(1),
   offset: Joi.number().integer().min(0),
   total: Joi.boolean(),
   renewQuery: Joi.boolean(),
@@ -104,10 +107,7 @@ const querySchema = Joi.object().keys({
 
 const normalizeQueryOrder = order => {
   let result = [];
-  const normalizeOrderItem = (k, direction) => ({
-    id: k,
-    desc: direction === 'desc'
-  });
+  const normalizeOrderItem = (k, direction) => ([k, direction]);
   if (order) {
     result = Array.isArray(order) ?
       order.map(([k, direction]) => normalizeOrderItem(k, direction)) :
@@ -146,26 +146,14 @@ const checkQueryFilters = (filter) => {
   return true;
 };
 
-const validatePostRewrite = (query) => {
-  const validQuery = query.measures && query.measures.length ||
-    query.dimensions && query.dimensions.length ||
-    query.timeDimensions && query.timeDimensions.filter(td => !!td.granularity).length;
-  if (!validQuery) {
-    throw new UserError(
-      'Query should contain either measures, dimensions or timeDimensions with granularities in order to be valid'
-    );
-  }
-  return query;
-};
-
 /**
  * Normalize incoming network query.
  * @param {Query} query
  * @throws {UserError}
  * @returns {NormalizedQuery}
  */
-const normalizeQuery = (query) => {
-  const { error } = Joi.validate(query, querySchema);
+const normalizeQuery = (query, persistent) => {
+  const { error } = querySchema.validate(query);
   if (error) {
     throw new UserError(`Invalid query format: ${error.message || error.toString()}`);
   }
@@ -185,25 +173,38 @@ const normalizeQuery = (query) => {
     granularity: d.split('.')[2]
   }));
   const timezone = query.timezone || 'UTC';
+
+  const def = getEnv('dbQueryDefaultLimit') <= getEnv('dbQueryLimit')
+    ? getEnv('dbQueryDefaultLimit')
+    : getEnv('dbQueryLimit');
+
+  let newLimit;
+  if (!persistent) {
+    if (
+      typeof query.limit === 'number' &&
+      query.limit > getEnv('dbQueryLimit')
+    ) {
+      throw new Error('The query limit has been exceeded.');
+    }
+    newLimit = typeof query.limit === 'number'
+      ? query.limit
+      : def;
+  } else {
+    newLimit = query.limit;
+  }
+
   return {
     ...query,
-    rowLimit: query.rowLimit || query.limit,
+    limit: newLimit,
     timezone,
     order: normalizeQueryOrder(query.order),
     filters: (query.filters || []).map(f => {
       const { dimension, member, ...filter } = f;
-      const normalizedFlter = {
+      return {
         ...filter,
-        member: member || dimension
+        member: member || dimension,
+        values: filter.values?.map(v => (v != null ? v.toString() : v))
       };
-
-      Object.defineProperty(normalizedFlter, 'dimension', {
-        get() {
-          console.warn('Warning: Attribute `filter.dimension` is deprecated. Please use \'member\' instead of \'dimension\'.');
-          return this.member;
-        }
-      });
-      return normalizedFlter;
     }),
     dimensions: (query.dimensions || []).filter(d => d.split('.').length !== 3),
     timeDimensions: (query.timeDimensions || []).map(td => {
@@ -231,6 +232,26 @@ const normalizeQuery = (query) => {
   };
 };
 
+const remapQueryOrder = order => {
+  let result = [];
+  const normalizeOrderItem = (k, direction) => ({
+    id: k,
+    desc: direction === 'desc'
+  });
+  if (order) {
+    result = Array.isArray(order) ?
+      order.map(([k, direction]) => normalizeOrderItem(k, direction)) :
+      Object.keys(order).map(k => normalizeOrderItem(k, order[k]));
+  }
+  return result;
+};
+
+const remapToQueryAdapterFormat = (query) => (query ? {
+  ...query,
+  rowLimit: query.limit,
+  order: remapQueryOrder(query.order),
+} : query);
+
 const queryPreAggregationsSchema = Joi.object().keys({
   metadata: Joi.object(),
   timezone: Joi.string(),
@@ -244,7 +265,7 @@ const queryPreAggregationsSchema = Joi.object().keys({
 });
 
 const normalizeQueryPreAggregations = (query, defaultValues) => {
-  const { error } = Joi.validate(query, queryPreAggregationsSchema);
+  const { error } = queryPreAggregationsSchema.validate(query);
   if (error) {
     throw new UserError(`Invalid query format: ${error.message || error.toString()}`);
   }
@@ -270,7 +291,7 @@ const queryPreAggregationPreviewSchema = Joi.object().keys({
 });
 
 const normalizeQueryPreAggregationPreview = (query) => {
-  const { error } = Joi.validate(query, queryPreAggregationPreviewSchema);
+  const { error } = queryPreAggregationPreviewSchema.validate(query);
   if (error) {
     throw new UserError(`Invalid query format: ${error.message || error.toString()}`);
   }
@@ -284,7 +305,7 @@ const queryCancelPreAggregationPreviewSchema = Joi.object().keys({
 });
 
 const normalizeQueryCancelPreAggregations = query => {
-  const { error } = Joi.validate(query, queryCancelPreAggregationPreviewSchema);
+  const { error } = queryCancelPreAggregationPreviewSchema.validate(query);
   if (error) {
     throw new UserError(`Invalid query format: ${error.message || error.toString()}`);
   }
@@ -295,9 +316,9 @@ const normalizeQueryCancelPreAggregations = query => {
 export {
   getQueryGranularity,
   getPivotQuery,
-  validatePostRewrite,
   normalizeQuery,
   normalizeQueryPreAggregations,
   normalizeQueryPreAggregationPreview,
   normalizeQueryCancelPreAggregations,
+  remapToQueryAdapterFormat,
 };

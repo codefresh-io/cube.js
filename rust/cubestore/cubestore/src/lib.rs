@@ -27,6 +27,7 @@ use log::SetLoggerError;
 use parquet::errors::ParquetError;
 use serde_derive::{Deserialize, Serialize};
 use sqlparser::parser::ParserError;
+use std::any::Any;
 use std::backtrace::Backtrace;
 use std::fmt;
 use std::fmt::Display;
@@ -38,6 +39,7 @@ use tokio::sync::mpsc::error::SendError;
 use tokio::time::error::Elapsed;
 
 pub mod app_metrics;
+pub mod cachestore;
 pub mod cluster;
 pub mod codegen;
 pub mod config;
@@ -48,6 +50,7 @@ pub mod mysql;
 pub mod queryplanner;
 pub mod remotefs;
 pub mod scheduler;
+pub mod shared;
 pub mod sql;
 pub mod store;
 pub mod streaming;
@@ -73,6 +76,7 @@ pub enum CubeErrorCauseType {
     User,
     Internal,
     CorruptData,
+    WrongConnection,
     Panic,
 }
 
@@ -124,6 +128,14 @@ impl CubeError {
         }
     }
 
+    pub fn wrong_connection(message: String) -> CubeError {
+        CubeError {
+            message,
+            backtrace: String::new(),
+            cause: CubeErrorCauseType::WrongConnection,
+        }
+    }
+
     pub fn panic(message: String) -> CubeError {
         CubeError {
             message,
@@ -135,6 +147,13 @@ impl CubeError {
     pub fn is_corrupt_data(&self) -> bool {
         match self.cause {
             CubeErrorCauseType::CorruptData => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_wrong_connection(&self) -> bool {
+        match self.cause {
+            CubeErrorCauseType::WrongConnection => true,
             _ => false,
         }
     }
@@ -154,11 +173,24 @@ impl CubeError {
             cause: CubeErrorCauseType::Internal,
         }
     }
+
+    pub fn from_panic_payload(payload: Box<dyn Any + Send>) -> Self {
+        if let Some(reason) = payload.downcast_ref::<&str>() {
+            CubeError::panic(format!("Reason: {}", reason))
+        } else if let Some(reason) = payload.downcast_ref::<String>() {
+            CubeError::panic(format!("Reason: {}", reason))
+        } else {
+            CubeError::panic("Without reason".to_string())
+        }
+    }
 }
 
 impl fmt::Display for CubeError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_fmt(format_args!("{:?}: {}", self.cause, self.message))
+        match self.cause {
+            CubeErrorCauseType::User => f.write_fmt(format_args!("{}", self.message)),
+            _ => f.write_fmt(format_args!("{:?}: {}", self.cause, self.message)),
+        }
     }
 }
 
@@ -171,6 +203,12 @@ impl From<flexbuffers::DeserializationError> for CubeError {
 impl From<rocksdb::Error> for CubeError {
     fn from(v: rocksdb::Error) -> Self {
         CubeError::from_error(v.into_string())
+    }
+}
+
+impl From<flatbuffers::InvalidFlatbuffer> for CubeError {
+    fn from(v: flatbuffers::InvalidFlatbuffer) -> Self {
+        CubeError::from_debug_error(v)
     }
 }
 

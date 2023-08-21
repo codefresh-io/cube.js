@@ -1,12 +1,44 @@
+/**
+ * @copyright Cube Dev, Inc.
+ * @license Apache-2.0
+ * @fileoverview The `BaseDriver` and related types declaration.
+ */
+
+import * as stream from 'stream';
+import type { ConnectionOptions as TLSConnectionOptions } from 'tls';
+
+import {
+  getEnv,
+  keyByDataSource,
+  isFilePath,
+  isSslKey,
+  isSslCert,
+} from '@cubejs-backend/shared';
 import { reduce } from 'ramda';
 import fs from 'fs';
-import { getEnv, isFilePath, isSslKey, isSslCert } from '@cubejs-backend/shared';
-
 import { cancelCombinator } from './utils';
-import { CreateTableIndex, DownloadQueryResultsOptions, DownloadQueryResultsResult, DownloadTableCSVData, DownloadTableData, DownloadTableMemoryData, DriverInterface, ExternalDriverCompatibilities, IndexesSQL, isDownloadTableMemoryData, QueryOptions, Row, Rows, TableColumn, TableColumnQueryResult, TableQueryResult, TableStructure } from './driver.interface';
+import {
+  ExternalCreateTableOptions,
+  DownloadQueryResultsOptions,
+  DownloadQueryResultsResult,
+  DownloadTableCSVData,
+  DownloadTableData,
+  DownloadTableMemoryData,
+  DriverInterface,
+  ExternalDriverCompatibilities,
+  IndexesSQL,
+  isDownloadTableMemoryData,
+  QueryOptions,
+  Row,
+  TableColumn,
+  TableColumnQueryResult,
+  TableQueryResult,
+  TableStructure,
+  DriverCapabilities
+} from './driver.interface';
 
-const sortByKeys = (unordered) => {
-  const ordered = {};
+const sortByKeys = (unordered: any) => {
+  const ordered: any = {};
 
   Object.keys(unordered).sort().forEach((key) => {
     ordered[key] = unordered[key];
@@ -15,7 +47,7 @@ const sortByKeys = (unordered) => {
   return ordered;
 };
 
-const DbTypeToGenericType = {
+const DbTypeToGenericType: Record<string, string> = {
   'timestamp without time zone': 'timestamp',
   'character varying': 'text',
   varchar: 'text',
@@ -46,7 +78,7 @@ const DB_INT_MAX = 2147483647;
 const DB_INT_MIN = -2147483648;
 
 // Order of keys is important here: from more specific to less specific
-const DbTypeValueMatcher = {
+const DbTypeValueMatcher: Record<string, ((v: any) => boolean)> = {
   timestamp: (v) => v instanceof Date || v.toString().match(/^\d\d\d\d-\d\d-\d\dT\d\d:\d\d:\d\d/),
   date: (v) => v instanceof Date || v.toString().match(/^\d\d\d\d-\d\d-\d\d$/),
   int: (v) => {
@@ -87,11 +119,25 @@ const DbTypeValueMatcher = {
   text: () => true
 };
 
+/**
+ * Base driver class.
+ */
 export abstract class BaseDriver implements DriverInterface {
+  private testConnectionTimeoutValue = 10000;
+
   protected logger: any;
 
-  public constructor(_options = {}) {
-    //
+  /**
+   * Class constructor.
+   */
+  public constructor(_options: {
+    /**
+     * Time to wait for a response from a connection after validation
+     * request before determining it as not valid. Default - 10000 ms.
+     */
+    testConnectionTimeout?: number,
+  } = {}) {
+    this.testConnectionTimeoutValue = _options.testConnectionTimeout || 10000;
   }
 
   protected informationSchemaQuery() {
@@ -105,28 +151,42 @@ export abstract class BaseDriver implements DriverInterface {
    `;
   }
 
-  protected getSslOptions() {
-    let ssl;
-
-    const sslOptions = [
-      { name: 'ca', canBeFile: true, envKey: 'CUBEJS_DB_SSL_CA', validate: isSslCert },
-      { name: 'cert', canBeFile: true, envKey: 'CUBEJS_DB_SSL_CERT', validate: isSslCert },
-      { name: 'key', canBeFile: true, envKey: 'CUBEJS_DB_SSL_KEY', validate: isSslKey },
-      { name: 'ciphers', envKey: 'CUBEJS_DB_SSL_CIPHERS' },
-      { name: 'passphrase', envKey: 'CUBEJS_DB_SSL_PASSPHRASE' },
-      { name: 'servername', envKey: 'CUBEJS_DB_SSL_SERVERNAME' },
-    ];
-
+  protected getSslOptions(dataSource: string): TLSConnectionOptions | undefined {
     if (
-      getEnv('dbSsl') ||
-      getEnv('dbSslRejectUnauthorized')
+      getEnv('dbSsl', { dataSource }) ||
+      getEnv('dbSslRejectUnauthorized', { dataSource })
     ) {
-      ssl = sslOptions.reduce(
-        (agg, { name, envKey, canBeFile, validate }) => {
-          if (process.env[envKey]) {
-            const value = process.env[envKey];
+      const sslOptions = [{
+        name: 'ca',
+        canBeFile: true,
+        envKey: keyByDataSource('CUBEJS_DB_SSL_CA', dataSource),
+        validate: isSslCert,
+      }, {
+        name: 'cert',
+        canBeFile: true,
+        envKey: keyByDataSource('CUBEJS_DB_SSL_CERT', dataSource),
+        validate: isSslCert,
+      }, {
+        name: 'key',
+        canBeFile: true,
+        envKey: keyByDataSource('CUBEJS_DB_SSL_KEY', dataSource),
+        validate: isSslKey,
+      }, {
+        name: 'ciphers',
+        envKey: keyByDataSource('CUBEJS_DB_SSL_CIPHERS', dataSource),
+      }, {
+        name: 'passphrase',
+        envKey: keyByDataSource('CUBEJS_DB_SSL_PASSPHRASE', dataSource),
+      }, {
+        name: 'servername',
+        envKey: keyByDataSource('CUBEJS_DB_SSL_SERVERNAME', dataSource),
+      }];
 
-            if (validate(value)) {
+      const ssl: TLSConnectionOptions = sslOptions.reduce(
+        (agg, { name, envKey, canBeFile, validate }) => {
+          const value = process.env[envKey];
+          if (value) {
+            if (validate && validate(value)) {
               return {
                 ...agg,
                 ...{ [name]: value }
@@ -163,15 +223,22 @@ export abstract class BaseDriver implements DriverInterface {
         {}
       );
 
-      ssl.rejectUnauthorized = getEnv('dbSslRejectUnauthorized');
+      ssl.rejectUnauthorized = getEnv('dbSslRejectUnauthorized', { dataSource });
+
+      return ssl;
     }
 
-    return ssl;
+    return undefined;
   }
 
   abstract testConnection(): Promise<void>;
 
   abstract query<R = unknown>(_query: string, _values?: unknown[], _options?: QueryOptions): Promise<R[]>;
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  public async streamQuery(sql: string, values: string[]): Promise<stream.Readable> {
+    throw new TypeError('Driver\'s .streamQuery() method is not implemented yet.');
+  }
 
   public async downloadQueryResults(query: string, values: unknown[], _options: DownloadQueryResultsOptions): Promise<DownloadQueryResultsResult> {
     const rows = await this.query<Row>(query, values);
@@ -201,7 +268,7 @@ export abstract class BaseDriver implements DriverInterface {
     return false;
   }
 
-  protected informationColumnsSchemaReducer(result, i) {
+  protected informationColumnsSchemaReducer(result: any, i: any) {
     let schema = (result[i.table_schema] || {});
     const tables = (schema[i.table_name] || []);
 
@@ -221,16 +288,15 @@ export abstract class BaseDriver implements DriverInterface {
     return this.query(query).then(data => reduce(this.informationColumnsSchemaReducer, {}, data));
   }
 
-  public async createSchemaIfNotExists(schemaName: string): Promise<Array<unknown>> {
-    return this.query(
+  public async createSchemaIfNotExists(schemaName: string): Promise<void> {
+    const schemas = await this.query(
       `SELECT schema_name FROM information_schema.schemata WHERE schema_name = ${this.param(0)}`,
       [schemaName]
-    ).then((schemas) => {
-      if (schemas.length === 0) {
-        return this.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
-      }
-      return null;
-    });
+    );
+
+    if (schemas.length === 0) {
+      await this.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`);
+    }
   }
 
   public getTablesQuery(schemaName: string) {
@@ -240,11 +306,11 @@ export abstract class BaseDriver implements DriverInterface {
     );
   }
 
-  public loadPreAggregationIntoTable(_preAggregationTableName: string, loadSql: string, params, options) {
+  public loadPreAggregationIntoTable(_preAggregationTableName: string, loadSql: string, params: any, options: any) {
     return this.query(loadSql, params, options);
   }
 
-  public dropTable(tableName: string, options?: unknown): Promise<unknown> {
+  public dropTable(tableName: string, options?: QueryOptions): Promise<unknown> {
     return this.query(`DROP TABLE ${tableName}`, [], options);
   }
 
@@ -253,7 +319,7 @@ export abstract class BaseDriver implements DriverInterface {
   }
 
   public testConnectionTimeout() {
-    return 10000;
+    return this.testConnectionTimeoutValue;
   }
 
   public async downloadTable(table: string, _options: ExternalDriverCompatibilities): Promise<DownloadTableMemoryData | DownloadTableCSVData> {
@@ -261,10 +327,10 @@ export abstract class BaseDriver implements DriverInterface {
   }
 
   public async uploadTable(table: string, columns: TableStructure, tableData: DownloadTableData) {
-    return this.uploadTableWithIndexes(table, columns, tableData, [], null, [], [], []);
+    return this.uploadTableWithIndexes(table, columns, tableData, [], null, [], {});
   }
 
-  public async uploadTableWithIndexes(table: string, columns: TableStructure, tableData: DownloadTableData, indexesSql: IndexesSQL, _uniqueKeyColumns: string[] | null, _queryTracingObj: any, _aggregates: string[], _createTableIndexes: CreateTableIndex[]) {
+  public async uploadTableWithIndexes(table: string, columns: TableStructure, tableData: DownloadTableData, indexesSql: IndexesSQL, _uniqueKeyColumns: string[] | null, _queryTracingObj: any, _externalOptions: ExternalCreateTableOptions) {
     if (!isDownloadTableMemoryData(tableData)) {
       throw new Error(`${this.constructor} driver supports only rows upload`);
     }
@@ -295,7 +361,7 @@ export abstract class BaseDriver implements DriverInterface {
     return value;
   }
 
-  public async tableColumnTypes(table: string) {
+  public async tableColumnTypes(table: string): Promise<TableStructure> {
     const [schema, name] = table.split('.');
 
     const columns = await this.query<TableColumnQueryResult>(
@@ -309,6 +375,11 @@ export abstract class BaseDriver implements DriverInterface {
     );
 
     return columns.map(c => ({ name: c.column_name, type: this.toGenericType(c.data_type) }));
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  public async queryColumnTypes(sql: string, params?: unknown[]): Promise<{ name: any; type: string; }[]> {
+    return [];
   }
 
   public createTable(quotedTableName: string, columns: TableColumn[]) {
@@ -336,15 +407,15 @@ export abstract class BaseDriver implements DriverInterface {
     return `"${identifier}"`;
   }
 
-  protected cancelCombinator(fn) {
+  protected cancelCombinator(fn: any) {
     return cancelCombinator(fn);
   }
 
-  public setLogger(logger) {
+  public setLogger(logger: any) {
     this.logger = logger;
   }
 
-  protected reportQueryUsage(usage, queryOptions) {
+  protected reportQueryUsage(usage: any, queryOptions: any) {
     if (this.logger) {
       this.logger('SQL Query Usage', {
         ...usage,
@@ -353,7 +424,7 @@ export abstract class BaseDriver implements DriverInterface {
     }
   }
 
-  protected databasePoolError(error) {
+  protected databasePoolError(error: any) {
     if (this.logger) {
       this.logger('Database Pool Error', {
         error: (error.stack || error).toString()
@@ -365,11 +436,15 @@ export abstract class BaseDriver implements DriverInterface {
     // override, if it's needed
   }
 
-  public capabilities(): ExternalDriverCompatibilities {
+  public capabilities(): DriverCapabilities {
     return {};
   }
 
   public nowTimestamp() {
     return Date.now();
+  }
+
+  public wrapQueryWithLimit(query: { query: string, limit: number}) {
+    query.query = `SELECT * FROM (${query.query}) AS t LIMIT ${query.limit}`;
   }
 }

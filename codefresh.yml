@@ -19,7 +19,7 @@ steps:
   install_dependencies:
     title: 'Installing dependencies'
     working_directory: ${{clone}}
-    image: node:12.22.9
+    image: node:14.21.1
     commands:
       - ls
       - yarn install --frozen-lockfile

@@ -1,7 +1,16 @@
+/**
+ * @copyright Cube Dev, Inc.
+ * @license Apache-2.0
+ * @fileoverview The `PostgresDriver` and related types declaration.
+ */
+
+import {
+  getEnv,
+  assertDataSource,
+} from '@cubejs-backend/shared';
 import { types, Pool, PoolConfig, PoolClient, FieldDef } from 'pg';
 // eslint-disable-next-line import/no-extraneous-dependencies
 import { TypeId, TypeFormat } from 'pg-types';
-import { getEnv } from '@cubejs-backend/shared';
 import * as moment from 'moment';
 import {
   BaseDriver,
@@ -14,7 +23,9 @@ import { QueryStream } from './QueryStream';
 const GenericTypeToPostgres: Record<GenericDataBaseType, string> = {
   string: 'text',
   double: 'decimal',
+  // Codefresh mapping for pre-aggregation to work on postgres with large numbers
   int: 'int8',
+  //
   // Revert mapping for internal pre-aggregations
   HLL_POSTGRES: 'hll',
 };
@@ -53,10 +64,16 @@ export type PostgresDriverConfiguration = Partial<PoolConfig> & {
   storeTimezone?: string,
   executionTimeout?: number,
   readOnly?: boolean,
-} & {
-  maxPoolSize?: number
+
+  /**
+   * The export bucket CSV file escape symbol.
+   */
+  exportBucketCsvEscapeSymbol?: string,
 };
 
+/**
+ * Postgres driver class.
+ */
 export class PostgresDriver<Config extends PostgresDriverConfiguration = PostgresDriverConfiguration>
   extends BaseDriver implements DriverInterface {
   /**
@@ -66,44 +83,76 @@ export class PostgresDriver<Config extends PostgresDriverConfiguration = Postgre
     return 2;
   }
 
+  private enabled: boolean = false;
+
   protected readonly pool: Pool;
 
   protected readonly config: Partial<Config>;
 
+  /**
+   * Class constructor.
+   */
   public constructor(
-    config: Partial<Config> = {}
-  ) {
-    super();
+    config: Partial<Config> & {
+      /**
+       * Data source name.
+       */
+      dataSource?: string,
 
+      /**
+       * Max pool size value for the [cube]<-->[db] pool.
+       */
+      maxPoolSize?: number,
+
+      /**
+       * Time to wait for a response from a connection after validation
+       * request before determining it as not valid. Default - 10000 ms.
+       */
+      testConnectionTimeout?: number,
+    } = {}
+  ) {
+    super({
+      testConnectionTimeout: config.testConnectionTimeout,
+    });
+
+    const dataSource =
+      config.dataSource ||
+      assertDataSource('default');
+    
     this.pool = new Pool({
-      max:
-        process.env.CUBEJS_DB_MAX_POOL && parseInt(process.env.CUBEJS_DB_MAX_POOL, 10) ||
-        config.maxPoolSize || 8,
       idleTimeoutMillis: 30000,
-      host: process.env.CUBEJS_DB_HOST,
-      database: process.env.CUBEJS_DB_NAME,
-      port: <any>process.env.CUBEJS_DB_PORT,
-      user: process.env.CUBEJS_DB_USER,
-      password: process.env.CUBEJS_DB_PASS,
-      ssl: this.getSslOptions(),
+      max:
+        config.maxPoolSize ||
+        getEnv('dbMaxPoolSize', { dataSource }) ||
+        8,
+      host: getEnv('dbHost', { dataSource }),
+      database: getEnv('dbName', { dataSource }),
+      port: getEnv('dbPort', { dataSource }),
+      user: getEnv('dbUser', { dataSource }),
+      password: getEnv('dbPass', { dataSource }),
+      ssl: this.getSslOptions(dataSource),
       ...config
     });
     this.pool.on('error', (err) => {
       console.log(`Unexpected error on idle client: ${err.stack || err}`); // TODO
     });
-
-    this.config = {
-      ...this.getInitialConfiguration(),
-      executionTimeout: getEnv('dbQueryTimeout'),
+    this.config = <Partial<Config>>{
+      ...this.getInitialConfiguration(dataSource),
+      executionTimeout: getEnv('dbQueryTimeout', { dataSource }),
+      exportBucketCsvEscapeSymbol: getEnv('dbExportBucketCsvEscapeSymbol', { dataSource }),
       ...config,
     };
+    this.enabled = true;
   }
 
   /**
    * The easiest way how to add additional configuration from env variables, because
    * you cannot call method in RedshiftDriver.constructor before super.
    */
-  protected getInitialConfiguration(): Partial<PostgresDriverConfiguration> {
+  protected getInitialConfiguration(
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    dataSource: string,
+  ): Partial<PostgresDriverConfiguration> {
     return {
       readOnly: true,
     };
@@ -210,6 +259,31 @@ export class PostgresDriver<Config extends PostgresDriverConfiguration = Postgre
     });
   }
 
+  public async streamQuery(sql: string, values: string[]): Promise<QueryStream> {
+    const conn = await this.pool.connect();
+    try {
+      await this.prepareConnection(conn);
+      const query: QueryStream = new QueryStream(sql, values, {
+        types: { getTypeParser: this.getTypeParser },
+        highWaterMark: getEnv('dbQueryStreamHighWaterMark'),
+      });
+      const rowsStream: QueryStream = await conn.query(query);
+      const cleanup = (err?: Error) => {
+        if (!rowsStream.destroyed) {
+          conn.release();
+          rowsStream.destroy(err);
+        }
+      };
+      rowsStream.once('end', cleanup);
+      rowsStream.once('error', cleanup);
+      rowsStream.once('close', cleanup);
+      return rowsStream;
+    } catch (e) {
+      await conn.release();
+      throw e;
+    }
+  }
+
   public async stream(
     query: string,
     values: unknown[],
@@ -227,11 +301,11 @@ export class PostgresDriver<Config extends PostgresDriverConfiguration = Postgre
         highWaterMark
       });
       const rowStream: QueryStream = await conn.query(queryStream);
-      const meta = await rowStream.fields();
+      const fields = await await rowStream.fields();
 
       return {
         rowStream,
-        types: this.mapFields(meta),
+        types: this.mapFields(fields),
         release: async () => {
           await conn.release();
         }
@@ -322,8 +396,11 @@ export class PostgresDriver<Config extends PostgresDriverConfiguration = Postgre
     }
   }
 
-  public release() {
-    return this.pool.end();
+  public async release() {
+    if (this.enabled) {
+      this.pool.end();
+      this.enabled = false;
+    }
   }
 
   public param(paramIndex: number) {
