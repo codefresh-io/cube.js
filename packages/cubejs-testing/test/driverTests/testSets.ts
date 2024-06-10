@@ -12,12 +12,15 @@ import {
   filteringCustomersEndsWithFilterFirst,
   filteringCustomersEndsWithFilterSecond,
   filteringCustomersEndsWithFilterThird,
-  filteringCustomersStartsWithAndDimensionsFirst,
-  filteringCustomersStartsWithAndDimensionsSecond,
-  filteringCustomersStartsWithAndDimensionsThird,
-  filteringCustomersEndsWithFilterAndDimensionsFirst,
-  filteringCustomersEndsWithFilterAndDimensionsSecond,
-  filteringCustomersEndsWithFilterAndDimensionsThird,
+  filteringCustomersNotEndsWithFilterFirst,
+  filteringCustomersNotEndsWithFilterSecond,
+  filteringCustomersNotEndsWithFilterThird,
+  filteringCustomersStartsWithFirst,
+  filteringCustomersStartsWithSecond,
+  filteringCustomersStartsWithThird,
+  filteringCustomersNotStartsWithFirst,
+  filteringCustomersNotStartsWithSecond,
+  filteringCustomersNotStartsWithThird,
   queryingProductDimensions,
   queryingProductsDimensionsAndOrder,
   queryingProductsDimensionsAndOrderAndLimit,
@@ -52,6 +55,13 @@ import {
   filteringECommerceEndsWithDimensionsSecond,
   filteringECommerceEndsWithDimensionsThird,
   queryingEcommerceTotalQuantifyAvgDiscountTotal,
+  queryingECommerceCountApproxByCustomerOverProductName,
+  queryingECommerceCountApproxByCustomerOverProductNameByMonth,
+  queryingECommerceCountApproxByCustomer,
+  hiddenMember,
+  hiddenCube,
+  viewMetaExposed,
+  preAggsCustomersRunningTotal,
 } from './tests';
 import { testSet } from './driverTest';
 
@@ -60,6 +70,12 @@ const skippedTestSet = testSet([
   queryingProductDimensions,
   queryingECommerceTotalQuantityAvgDiscountTotalSales,
   queryingECommerceTotalSalesTotalProfitByMonthAndOrder
+]);
+
+const hyperloglogTestSet = testSet([
+  queryingECommerceCountApproxByCustomerOverProductNameByMonth,
+  queryingECommerceCountApproxByCustomerOverProductName,
+  queryingECommerceCountApproxByCustomer,
 ]);
 
 const withOrderingTestSet = testSet([
@@ -97,15 +113,18 @@ const withoutOrderingTestSet = testSet([
   filteringCustomersCubeFirst,
   filteringCustomersCubeSecond,
   filteringCustomersCubeThird,
+  filteringCustomersStartsWithFirst,
+  filteringCustomersStartsWithSecond,
+  filteringCustomersStartsWithThird,
+  filteringCustomersNotStartsWithFirst,
+  filteringCustomersNotStartsWithSecond,
+  filteringCustomersNotStartsWithThird,
   filteringCustomersEndsWithFilterFirst,
   filteringCustomersEndsWithFilterSecond,
   filteringCustomersEndsWithFilterThird,
-  filteringCustomersStartsWithAndDimensionsFirst,
-  filteringCustomersStartsWithAndDimensionsSecond,
-  filteringCustomersStartsWithAndDimensionsThird,
-  filteringCustomersEndsWithFilterAndDimensionsFirst,
-  filteringCustomersEndsWithFilterAndDimensionsSecond,
-  filteringCustomersEndsWithFilterAndDimensionsThird,
+  filteringCustomersNotEndsWithFilterFirst,
+  filteringCustomersNotEndsWithFilterSecond,
+  filteringCustomersNotEndsWithFilterThird,
   queryingProductDimensions,
   queryingECommerceDimensions,
   queryingECommerceDimensionsLimit,
@@ -118,11 +137,22 @@ const withoutOrderingTestSet = testSet([
   filteringECommerceStartsWithDimensionsThird,
   filteringECommerceEndsWithDimensionsFirst,
   filteringECommerceEndsWithDimensionsSecond,
-  filteringECommerceEndsWithDimensionsThird
+  filteringECommerceEndsWithDimensionsThird,
 ]);
 
 export const mainTestSet = testSet([
   ...skippedTestSet,
+  ...hyperloglogTestSet,
   ...withOrderingTestSet,
   ...withoutOrderingTestSet,
+  viewMetaExposed
+]);
+
+export const preAggsTestSet = testSet([
+  preAggsCustomersRunningTotal,
+]);
+
+export const productionTestSet = testSet([
+  hiddenMember,
+  hiddenCube,
 ]);

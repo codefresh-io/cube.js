@@ -48,7 +48,7 @@ interface Args {
   log: Log,
 }
 
-export type DriverType = 'postgresql' | 'postgres' | 'multidb' | 'materialize' | 'crate' | 'bigquery' | 'athena' | 'postgresql-cubestore' | 'firebolt' | 'questdb' | 'redshift';
+export type DriverType = 'postgresql' | 'postgres' | 'multidb' | 'materialize' | 'crate' | 'bigquery' | 'athena' | 'postgresql-cubestore' | 'firebolt' | 'questdb' | 'redshift' | 'databricks-jdbc' | 'prestodb' | 'mssql' | 'trino' | 'oracle' | 'duckdb' | 'snowflake';
 
 export type Schemas = string[];
 
@@ -102,6 +102,13 @@ const driverNameToFolderNameMapper: Record<DriverType, string> = {
   firebolt: 'postgresql',
   questdb: 'postgresql',
   redshift: 'postgresql',
+  'databricks-jdbc': 'databricks-jdbc',
+  prestodb: 'postgresql',
+  mssql: 'mssql',
+  trino: 'postgresql',
+  oracle: 'oracle',
+  duckdb: 'postgresql',
+  snowflake: 'snowflake',
 };
 
 /**
@@ -167,6 +174,9 @@ function clearTestData(type: DriverType) {
 function runSchemasGeneration(type: DriverType, schemas: Schemas) {
   const targetFolder = getTargetFolder(type);
 
+  if (!fs.existsSync(targetFolder)) {
+    fs.mkdirSync(targetFolder, { recursive: true });
+  }
   schemas.forEach((s) => {
     const originalContent = fs.readFileSync(
       path.join(SOURCE, s), 'utf8'
@@ -174,6 +184,7 @@ function runSchemasGeneration(type: DriverType, schemas: Schemas) {
 
     const { base } = path.parse(s);
     const updatedContent = originalContent.replace('_type_', type);
+
     fs.writeFileSync(
       path.join(targetFolder, base),
       updatedContent
@@ -321,6 +332,8 @@ export async function startBirdBoxFromContainer(
       'BIRDBOX_CUBESTORE_VERSION',
       process.env.BIRDBOX_CUBESTORE_VERSION
     )
+    .withEnv('CUBEJS_TELEMETRY', 'false')
+    .withEnv('CUBEJS_SCHEMA_PATH', 'schema')
     .up();
 
   const host = '127.0.0.1';
@@ -419,10 +432,15 @@ export async function startBirdBoxFromCli(
   let db: StartedTestContainer;
   let cli: ChildProcess;
 
-  if (!options.schemaDir) {
+  if (options.schemas) {
+    options.schemaDir = `${options.type}/schema`;
+    const cubejsConfigByType = `${options.type}/cube.js`;
+    if (fs.existsSync(cubejsConfigByType)) {
+      options.cubejsConfig = cubejsConfigByType;
+    }
+  } else if (!options.schemaDir) {
     options.schemaDir = 'postgresql/schema';
   }
-
   if (!options.cubejsConfig) {
     options.cubejsConfig = 'postgresql/single/cube.js';
   }
@@ -465,6 +483,8 @@ export async function startBirdBoxFromCli(
         `[Birdbox] Script ${loadScript} finished successfully\n`
       );
     }
+  } else if (!options.env?.CUBEJS_DB_HOST) {
+    db = await PostgresDBRunner.startContainer({});
   }
 
   const testDir = path.join(process.cwd(), 'birdbox-test-project');
@@ -509,24 +529,32 @@ export async function startBirdBoxFromCli(
     );
   }
 
+  if (!fs.existsSync(path.join(testDir, 'package.json'))) {
+    fs.writeFileSync(path.join(testDir, 'package.json'), '{}', { encoding: 'utf-8' });
+  }
+
   const env = {
     ...process.env,
     CUBEJS_DB_TYPE: options.type === 'postgresql'
       ? 'postgres'
       : options.type,
+    CUBEJS_SCHEMA_PATH: 'schema',
     CUBEJS_DEV_MODE: 'true',
     CUBEJS_API_SECRET: 'mysupersecret',
     CUBEJS_WEB_SOCKETS: 'true',
     CUBEJS_PLAYGROUND_AUTH_SECRET: 'mysupersecret',
-    ...options.env
-      ? options.env
+    CUBEJS_TELEMETRY: 'false',
+    CUBEJS_CACHE_AND_QUEUE_DRIVER: 'memory',
+    ...(options.env?.CUBEJS_DB_HOST
+      ? undefined
       : {
         CUBEJS_DB_HOST: db!.getHost(),
         CUBEJS_DB_PORT: `${db!.getMappedPort(5432)}`,
         CUBEJS_DB_NAME: 'test',
         CUBEJS_DB_USER: 'test',
         CUBEJS_DB_PASS: 'test',
-      }
+      }),
+    ...options.env,
   };
 
   try {
@@ -580,7 +608,9 @@ export async function startBirdBoxFromCli(
       if (options.log === Log.PIPE) {
         process.stdout.write('[Birdbox] Done with DB\n');
       }
-      process.kill(-cli.pid, 'SIGINT');
+      if (cli.pid) {
+        process.kill(-cli.pid, 'SIGINT');
+      }
       if (options.log === Log.PIPE) {
         process.stdout.write('[Birdbox] Closed\n');
       }
@@ -672,12 +702,13 @@ export async function getBirdbox(
       case Mode.CLI:
       case Mode.LOCAL: {
         birdbox = await startBirdBoxFromCli({
-          type,
+          type: type === 'postgres' ? 'postgresql' : type,
           env,
           log,
           cubejsConfig: options.cubejsConfig,
           schemaDir: options.schemaDir,
           useCubejsServerBinary: mode === Mode.LOCAL,
+          schemas: options?.schemas,
         });
         break;
       }
@@ -699,7 +730,7 @@ export async function getBirdbox(
     }
   } catch (e) {
     clearTestData(type);
-    process.stderr.write(e.toString());
+    process.stderr.write((<any>e).toString());
     process.exit(1);
   }
   return birdbox;

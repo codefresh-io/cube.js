@@ -1,6 +1,10 @@
-const R = require('ramda');
-const { BaseQueueDriver } = require('./BaseQueueDriver');
+import R from 'ramda';
+import { QueueDriverInterface, QueueDriverConnectionInterface } from '@cubejs-backend/base-driver';
+import { BaseQueueDriver } from './BaseQueueDriver';
 
+/**
+ * @implements {QueueDriverConnectionInterface}
+ */
 export class LocalQueueDriverConnection {
   constructor(driver, options) {
     this.redisQueuePrefix = options.redisQueuePrefix;
@@ -20,6 +24,28 @@ export class LocalQueueDriverConnection {
     this.getQueueEventsBus = options.getQueueEventsBus;
   }
 
+  async getQueriesToCancel() {
+    const [stalled, orphaned] = await Promise.all([
+      this.getStalledQueries(),
+      this.getOrphanedQueries(),
+    ]);
+
+    return stalled.concat(orphaned);
+  }
+
+  /**
+   * @returns {Promise<GetActiveAndToProcessResponse>}
+   */
+  async getActiveAndToProcess() {
+    const active = this.queueArrayAsTuple(this.active);
+    const toProcess = this.queueArrayAsTuple(this.toProcess);
+
+    return [
+      active,
+      toProcess
+    ];
+  }
+
   getResultPromise(resultListKey) {
     if (!this.resultPromises[resultListKey]) {
       let resolveMethod = null;
@@ -31,9 +57,10 @@ export class LocalQueueDriverConnection {
     return this.resultPromises[resultListKey];
   }
 
-  async getResultBlocking(queryKey) {
-    const resultListKey = this.resultListKey(queryKey);
-    if (!this.queryDef[this.redisHash(queryKey)] && !this.resultPromises[resultListKey]) {
+  async getResultBlocking(queryKeyHash) {
+    // Double redisHash apply is being used here
+    const resultListKey = this.resultListKey(queryKeyHash);
+    if (!this.queryDef[queryKeyHash] && !this.resultPromises[resultListKey]) {
       return null;
     }
     const timeoutPromise = (timeout) => new Promise((resolve) => setTimeout(() => resolve(null), timeout));
@@ -49,14 +76,25 @@ export class LocalQueueDriverConnection {
     return res;
   }
 
+  /**
+   * Returns promise wich will be resolved with the specified by the
+   * queryKey query result or null if query was not added to the
+   * processing.
+   * @param {*} queryKey
+   * @returns {Promise<null | *>}
+   */
   async getResult(queryKey) {
     const resultListKey = this.resultListKey(queryKey);
     if (this.resultPromises[resultListKey] && this.resultPromises[resultListKey].resolved) {
       return this.getResultBlocking(queryKey);
     }
+
     return null;
   }
 
+  /**
+   * @protected
+   */
   queueArray(queueObj, orderFilterLessThan) {
     return R.pipe(
       R.values,
@@ -66,8 +104,39 @@ export class LocalQueueDriverConnection {
     )(queueObj);
   }
 
+  /**
+   * @protected
+   * @param queueObj
+   * @param orderFilterLessThan
+   * @returns {QueryKeysTuple[]}
+   */
+  queueArrayAsTuple(queueObj, orderFilterLessThan) {
+    return R.pipe(
+      R.values,
+      R.filter(orderFilterLessThan ? q => q.order < orderFilterLessThan : R.identity),
+      R.sortBy(q => q.order),
+      R.map(q => [q.key, q.queueId])
+    )(queueObj);
+  }
+
+  /**
+   * Adds specified by the queryKey query to the queue, returns tuple
+   * with the operation result.
+   *
+   * @typedef {[added: number, _b: null, _c: null, toProcessLength: number, addedTime: number]} AddedTuple
+   *
+   * @param {number} keyScore
+   * @param {*} queryKey
+   * @param {number} orphanedTime
+   * @param {string} queryHandler (for the regular query is eq to 'query')
+   * @param {*} query
+   * @param {number} priority
+   * @param {*} options
+   * @returns {AddedTuple}
+   */
   addToQueue(keyScore, queryKey, orphanedTime, queryHandler, query, priority, options) {
     const queryQueueObj = {
+      queueId: options.queueId,
       queryHandler,
       query,
       queryKey,
@@ -76,19 +145,27 @@ export class LocalQueueDriverConnection {
       requestId: options.requestId,
       addedToQueueTime: new Date().getTime()
     };
+
     const key = this.redisHash(queryKey);
     if (!this.queryDef[key]) {
       this.queryDef[key] = queryQueueObj;
     }
+
     let added = 0;
     if (!this.toProcess[key]) {
       this.toProcess[key] = {
         order: keyScore,
+        queueId: options.queueId,
         key
       };
       added = 1;
     }
-    this.recent[key] = { order: orphanedTime, key };
+
+    this.recent[key] = {
+      order: orphanedTime,
+      key,
+      queueId: options.queueId,
+    };
 
     if (this.getQueueEventsBus) {
       this.getQueueEventsBus().emit({
@@ -99,15 +176,20 @@ export class LocalQueueDriverConnection {
       });
     }
 
-    return [added, null, null, Object.keys(this.toProcess).length, queryQueueObj.addedToQueueTime]; // TODO nulls
+    return [
+      added,
+      queryQueueObj.queueId,
+      Object.keys(this.toProcess).length,
+      queryQueueObj.addedToQueueTime
+    ];
   }
 
   getToProcessQueries() {
-    return this.queueArray(this.toProcess);
+    return this.queueArrayAsTuple(this.toProcess);
   }
 
   getActiveQueries() {
-    return this.queueArray(this.active);
+    return this.queueArrayAsTuple(this.active);
   }
 
   async getQueryAndRemove(queryKey) {
@@ -170,11 +252,11 @@ export class LocalQueueDriverConnection {
   }
 
   getOrphanedQueries() {
-    return this.queueArray(this.recent, new Date().getTime());
+    return this.queueArrayAsTuple(this.recent, new Date().getTime());
   }
 
   getStalledQueries() {
-    return this.queueArray(this.heartBeat, new Date().getTime() - this.heartBeatTimeout * 1000);
+    return this.queueArrayAsTuple(this.heartBeat, new Date().getTime() - this.heartBeatTimeout * 1000);
   }
 
   async getQueryStageState(onlyKeys) {
@@ -182,9 +264,14 @@ export class LocalQueueDriverConnection {
   }
 
   async getQueryDef(queryKey) {
-    return this.queryDef[this.redisHash(queryKey)];
+    return this.queryDef[queryKey];
   }
 
+  /**
+   * Updates heart beat for the processing query by its `queryKey`.
+   *
+   * @param {string} queryKey
+   */
   updateHeartBeat(queryKey) {
     const key = this.redisHash(queryKey);
     if (this.heartBeat[key]) {
@@ -195,12 +282,14 @@ export class LocalQueueDriverConnection {
   retrieveForProcessing(queryKey, processingId) {
     const key = this.redisHash(queryKey);
     let lockAcquired = false;
+
     if (!this.processingLocks[key]) {
       this.processingLocks[key] = processingId;
       lockAcquired = true;
     } else {
       return null;
     }
+
     let added = 0;
     if (Object.keys(this.active).length < this.concurrency && !this.active[key]) {
       this.active[key] = { key, order: processingId };
@@ -218,8 +307,13 @@ export class LocalQueueDriverConnection {
     }
 
     return [
-      added, null, this.queueArray(this.active), Object.keys(this.toProcess).length, this.queryDef[key], lockAcquired
-    ]; // TODO nulls
+      added,
+      this.queryDef[key]?.queueId,
+      this.queueArray(this.active),
+      Object.keys(this.toProcess).length,
+      this.queryDef[key],
+      lockAcquired
+    ];
   }
 
   freeProcessingLock(queryKey, processingId, activated) {
@@ -245,14 +339,31 @@ export class LocalQueueDriverConnection {
   release() {
   }
 
+  /**
+   * Returns cache key to the specified by the queryKey query and the
+   * specified by the suffix query state.
+   * @param {*} queryKey
+   * @param {string} suffix
+   * @returns {string}
+   */
   queryRedisKey(queryKey, suffix) {
     return `${this.redisQueuePrefix}_${this.redisHash(queryKey)}_${suffix}`;
   }
 
+  /**
+   * Returns cache key to the cached query result.
+   * @param {*} queryKey
+   * @returns {string}
+   */
   resultListKey(queryKey) {
     return this.queryRedisKey(queryKey, 'RESULT');
   }
 
+  /**
+   * Returns hash sum of the query specified by the queryKey.
+   * @param {*} queryKey
+   * @returns {string}
+   */
   redisHash(queryKey) {
     return this.driver.redisHash(queryKey);
   }
@@ -268,9 +379,12 @@ const heartBeat = {};
 const processingCounters = {};
 const processingLocks = {};
 
+/**
+ * @implements {QueueDriverInterface}
+ */
 export class LocalQueueDriver extends BaseQueueDriver {
   constructor(options) {
-    super();
+    super(options.processUid);
     this.options = options;
     results[options.redisQueuePrefix] = results[options.redisQueuePrefix] || {};
     resultPromises[options.redisQueuePrefix] = resultPromises[options.redisQueuePrefix] || {};

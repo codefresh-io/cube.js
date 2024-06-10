@@ -5,8 +5,9 @@ import {
   TransformedQuery,
 } from '@cubejs-client/core';
 import { camelCase } from 'camel-case';
+import { dump } from 'js-yaml';
 
-import { QueryMemberKey } from '../types';
+import { QueryMemberKey, SchemaFormat } from '../types';
 import { RollupSettings } from './components/Settings';
 
 export type PreAggregationReferences = {
@@ -43,19 +44,19 @@ export function getPreAggregationReferences(
     references.measures = [...transformedQuery.leafMeasures];
   }
 
-  if (transformedQuery.sortedDimensions.length) {
+  if (transformedQuery.ownedDimensions.length) {
     references.dimensions = [
-      ...transformedQuery.sortedDimensions.filter(
+      ...transformedQuery.ownedDimensions.filter(
         (name) => !segments.has(name)
       ),
     ];
     references.segments = [
-      ...transformedQuery.sortedDimensions.filter((name) => segments.has(name)),
+      ...transformedQuery.ownedDimensions.filter((name) => segments.has(name)),
     ];
   }
 
-  if (transformedQuery.sortedTimeDimensions?.[0]?.[0]) {
-    const [dimension, granularity] = transformedQuery.sortedTimeDimensions[0];
+  if (transformedQuery.ownedTimeDimensionsWithRollupGranularity?.[0]?.[0]) {
+    const [dimension, granularity] = transformedQuery.ownedTimeDimensionsWithRollupGranularity[0];
     references.timeDimensions = [
       {
         dimension,
@@ -87,7 +88,8 @@ type PreAggregationDefinitionResult = {
 export function getRollupDefinitionFromReferences(
   references: PreAggregationReferences,
   name: string = 'main',
-  settings: RollupSettings
+  settings: RollupSettings,
+  schemaFormat: SchemaFormat
 ): PreAggregationDefinitionResult {
   const { timeDimensions, ...otherReferences } = references;
   const code: Record<string, any> = {
@@ -111,12 +113,28 @@ export function getRollupDefinitionFromReferences(
     }
   }
 
-  const value = JSON.stringify(code, null, 2).replaceAll('"', '');
+  if (schemaFormat === SchemaFormat.js) {
+    const value = JSON.stringify(code, null, 2).replaceAll('"', '');
 
-  return {
-    code: `${camelCase(name)}: ${value}`,
-    value,
-  };
+    return {
+      code: `${camelCase(name)}: ${value}`,
+      value,
+    };
+  } else {
+    const value = dump(
+      JSON.parse(
+        JSON.stringify({
+          name: camelCase(name),
+          ...code,
+        }).replaceAll('`', '')
+      )
+    );
+
+    return {
+      code: value,
+      value,
+    };
+  }
 }
 
 export function updateQuery(

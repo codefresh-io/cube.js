@@ -31,18 +31,15 @@ fn main() {
 
     // console_subscriber::init();
 
-    ReportingLogger::init(
-        Box::new(logger),
-        Box::new(LocalReporter::new()),
-        log_level.to_level_filter(),
-    )
-    .unwrap();
+    log::set_boxed_logger(Box::new(logger)).unwrap();
+    ReportingLogger::init(Box::new(LocalReporter::new()), log_level.to_level_filter()).unwrap();
 
     let config = Config::default();
 
     let runtime = Builder::new_multi_thread().enable_all().build().unwrap();
     runtime.block_on(async move {
-        let services = config.configure().await;
+        config.configure().await;
+        let services = config.cube_services().await;
         log::debug!("Cube SQL Start");
         stop_on_ctrl_c(&services).await;
         services.wait_processing_loops().await.unwrap();

@@ -1,7 +1,15 @@
+/**
+ * @copyright Cube Dev, Inc.
+ * @license Apache-2.0
+ * @fileoverview The `MaterializeDriver` and related types declaration.
+ */
+
 import { PostgresDriver, PostgresDriverConfiguration } from '@cubejs-backend/postgres-driver';
 import { BaseDriver, DownloadTableMemoryData, IndexesSQL, StreamOptions, StreamTableDataWithTypes, TableStructure } from '@cubejs-backend/base-driver';
 import { PoolClient, QueryResult } from 'pg';
+import { reduce } from 'ramda';
 import { Readable } from 'stream';
+import semver from 'semver';
 
 export type ReadableStreamTableDataWithTypes = StreamTableDataWithTypes & {
   /**
@@ -10,6 +18,19 @@ export type ReadableStreamTableDataWithTypes = StreamTableDataWithTypes & {
   rowStream: Readable;
 };
 
+export type SchemaResponse = {
+  [schema: string]: {
+    [schemaObject: string]: {
+      name: string;
+      type: string;
+      attributes: any[];
+  }[];
+  }
+};
+
+/**
+ * Materialize driver class.
+ */
 export class MaterializeDriver extends PostgresDriver {
   /**
    * Returns default concurrency value.
@@ -18,7 +39,55 @@ export class MaterializeDriver extends PostgresDriver {
     return 2;
   }
 
-  public constructor(options: PostgresDriverConfiguration = {}) {
+  /**
+   * Class constructor.
+   */
+  public constructor(
+    options: PostgresDriverConfiguration & {
+      /**
+       * Data source name.
+       */
+      dataSource?: string,
+
+      /**
+       * Max pool size value for the [cube]<-->[db] pool.
+       */
+      maxPoolSize?: number,
+
+      /**
+       * Time to wait for a response from a connection after validation
+       * request before determining it as not valid. Default - 10000 ms.
+       */
+      testConnectionTimeout?: number,
+
+      /**
+       * Optional cluster name to set for the connection.
+       */
+      cluster?: string,
+
+      /**
+       * SSL is enabled by default. Set to false to disable.
+       */
+      ssl?: boolean | { rejectUnauthorized: boolean },
+
+      /**
+       * Application name to set for the connection.
+       */
+      application_name?: string,
+    } = {},
+  ) {
+    // Enable SSL by default if not set explicitly to false
+    const sslEnv = process.env.CUBEJS_DB_SSL;
+    if (sslEnv === 'false') {
+      options.ssl = false;
+    } else if (sslEnv === 'true') {
+      options.ssl = { rejectUnauthorized: true };
+    } else if (options.ssl === undefined) {
+      options.ssl = true;
+    }
+    // Set application name to 'cubejs-materialize-driver' by default
+    options.application_name = options.application_name || 'cubejs-materialize-driver';
+
     super(options);
   }
 
@@ -27,6 +96,11 @@ export class MaterializeDriver extends PostgresDriver {
   ) {
     await conn.query(`SET TIME ZONE '${this.config.storeTimezone || 'UTC'}'`);
     // Support for statement_timeout is still pending. https://github.com/MaterializeInc/materialize/issues/10390
+
+    // Set cluster to the CUBEJS_DB_MATERIALIZE_CLUSTER env variable if it exists
+    if (process.env.CUBEJS_DB_MATERIALIZE_CLUSTER) {
+      await conn.query(`SET CLUSTER TO ${process.env.CUBEJS_DB_MATERIALIZE_CLUSTER}`);
+    }
   }
 
   protected async loadUserDefinedTypes(): Promise<void> {
@@ -37,14 +111,13 @@ export class MaterializeDriver extends PostgresDriver {
    * @param {string} schemaName
    * @return {Promise<Array<unknown>>}
    */
-  public async createSchemaIfNotExists(schemaName: string): Promise<unknown[]> {
+  public async createSchemaIfNotExists(schemaName: string): Promise<void> {
     const schemas = await this.query(
       `SHOW SCHEMAS WHERE name = '${schemaName}'`, []
     );
     if (schemas.length === 0) {
-      this.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`, []);
+      await this.query(`CREATE SCHEMA IF NOT EXISTS ${schemaName}`, []);
     }
-    return [];
   }
 
   public async uploadTableWithIndexes(
@@ -53,7 +126,7 @@ export class MaterializeDriver extends PostgresDriver {
     tableData: DownloadTableMemoryData,
     indexesSql: IndexesSQL
   ) {
-    return BaseDriver.prototype.uploadTableWithIndexes.bind(this)(table, columns, tableData, indexesSql, [], null, [], []);
+    return BaseDriver.prototype.uploadTableWithIndexes.bind(this)(table, columns, tableData, indexesSql, [], null, {});
   }
 
   /**
@@ -61,8 +134,9 @@ export class MaterializeDriver extends PostgresDriver {
    * Returns materialized sources, materialized views, and tables
    * @returns {string} schemaQuery
    */
-  public informationSchemaQuery(): string {
-    const materializationFilter = `
+  public informationSchemaQueryWithFilter(version: string): string {
+    console.log(version);
+    const materializationFilter = semver.lt(version, 'v0.27.0-alpha') ? `
         table_name IN (
           SELECT name
           FROM mz_catalog.mz_sources
@@ -74,9 +148,38 @@ export class MaterializeDriver extends PostgresDriver {
           UNION
           SELECT t.name
           FROM mz_catalog.mz_tables t
-        )`;
+        )` : `
+        table_name IN (
+          SELECT name
+          FROM mz_catalog.mz_sources
+          UNION
+          SELECT name
+          FROM mz_catalog.mz_tables t
+          UNION
+          SELECT name
+          FROM mz_catalog.mz_materialized_views t
+        )
+        `;
 
     return `${super.informationSchemaQuery()} AND ${materializationFilter}`;
+  }
+
+  /**
+   * Materialize instance version
+   * @returns {Promise<string>} version
+   */
+  public async getMaterializeVersion(): Promise<string> {
+    const [{ version }] = await this.query<{version: string}>('SELECT mz_version() as version;', []);
+
+    // Materialzie returns the version as follows: 'v0.24.3-alpha.5 (65778f520)'
+    return version.split(' ')[0];
+  }
+
+  public async tablesSchema(): Promise<SchemaResponse> {
+    const version = await this.getMaterializeVersion();
+    const query = this.informationSchemaQueryWithFilter(version);
+
+    return this.query(query, []).then(data => reduce(this.informationColumnsSchemaReducer, {}, data));
   }
 
   protected async* asyncFetcher<R extends unknown>(conn: PoolClient, cursorId: string): AsyncGenerator<R> {

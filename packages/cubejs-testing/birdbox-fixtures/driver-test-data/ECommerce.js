@@ -20,6 +20,22 @@ cube(`ECommerce`, {
         every: `1 hour`,
       },
     },
+    manual: {
+      external: false,
+      scheduledRefresh: false,
+      timeDimension: CUBE.orderDate,
+      granularity: `month`,
+      partitionGranularity: `month`,
+      dimensions: [
+        CUBE.productName,
+      ],
+      measures: [
+        CUBE.totalQuantity,
+        CUBE.avgDiscount,
+        CUBE.totalSales,
+        CUBE.totalProfit,
+      ],
+    },
   },
   joins: {
     Customers: {
@@ -29,7 +45,14 @@ cube(`ECommerce`, {
   },
   measures: {
     count: {
-      type: `count`,
+      type: 'count',
+      meta: {
+        foo: 'bar'
+      }
+    },
+    countApproxByCustomer: {
+      type: 'count_distinct_approx',
+      sql: 'customer_id',
     },
     totalQuantity: {
       sql: 'quantity',
@@ -47,12 +70,18 @@ cube(`ECommerce`, {
       sql: 'profit',
       type: 'sum',
     },
+    hiddenSum: {
+      sql: 'profit',
+      type: 'sum',
+      shown: false,
+    },
   },
   dimensions: {
     rowId: {
       sql: 'row_id',
       type: 'number',
       primaryKey: true,
+      shown: true,
     },
     orderId: {
       sql: 'order_id',
@@ -91,4 +120,12 @@ cube(`ECommerce`, {
       type: 'number',
     },
   },
+});
+
+view(`ECommerceView`, {
+  cubes: [{
+    joinPath: ECommerce,
+    includes: `*`,
+    excludes: [`orderDate`]
+  }]
 });

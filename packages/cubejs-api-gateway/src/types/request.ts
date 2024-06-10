@@ -52,6 +52,8 @@ interface Request extends ExpressRequest {
    */
   securityContext?: any,
 
+  requestStarted?: Date,
+
   /**
    * @deprecated
    */
@@ -87,6 +89,13 @@ type ExtendContextFn =
   (req: ExpressRequest) =>
     Promise<RequestExtension> | RequestExtension;
 
+type ErrorResponse = {
+  error: string,
+};
+
+type MetaResponse = { cubes: any[], compilerId?: string };
+type MetaResponseResultFn = (message: MetaResponse | ErrorResponse) => void;
+
 /**
  * Function that should provides a logic for the response result
  * processing. Used as a part of a main configuration object of the
@@ -96,7 +105,7 @@ type ExtendContextFn =
  */
 type ResponseResultFn =
   (
-    message: Record<string, any> | Record<string, any>[],
+    message: (Record<string, any> | Record<string, any>[]) | ErrorResponse,
     extra?: { status: number }
   ) => void;
 
@@ -117,17 +126,100 @@ type QueryRequest = BaseRequest & {
   queryType?: RequestType;
   apiType?: ApiType;
   resType?: ResultType
+  memberToAlias?: Record<string, string>;
+  expressionParams?: string[];
+  exportAnnotatedSql?: boolean;
+  memberExpressions?: boolean;
+  disableExternalPreAggregations?: boolean;
+  disableLimitEnforcing?: boolean;
 };
+
+type SqlApiRequest = BaseRequest & {
+  query: Record<string, any>;
+  sqlQuery?: [string, string[]];
+  apiType?: ApiType;
+  queryKey: any;
+  streaming?: boolean;
+};
+
+/**
+ * Pre-aggregations selector object.
+ */
+type PreAggsSelector = {
+  contexts?: {securityContext: any}[],
+  timezones: string[],
+  dataSources?: string[],
+  cubes?: string[],
+  preAggregations?: string[],
+};
+
+/**
+ * Posted pre-aggs job object.
+ */
+type PreAggJob = {
+  request: string;
+  context: {securityContext: any};
+  preagg: string;
+  table: string;
+  target: string;
+  structure: string;
+  content: string;
+  updated: number;
+  key: any[];
+  status: string;
+  timezone: string;
+  dataSource: string;
+};
+
+/**
+ * The `/cubejs-system/v1/pre-aggregations/jobs` endpoint object type.
+ */
+type PreAggsJobsRequest = {
+  action: 'post' | 'get' | 'delete',
+  selector?: PreAggsSelector,
+  tokens?: string[]
+  resType?: 'object' | 'array'
+};
+
+type PreAggJobStatusItemNotFound = {
+  token: string;
+  status: 'not_found' | 'pre_agg_not_found';
+};
+
+type PreAggJobStatusItemFound = {
+  token: string;
+  status: string;
+  table: string;
+  selector: PreAggsSelector;
+};
+
+type PreAggJobStatusItem = PreAggJobStatusItemNotFound | PreAggJobStatusItemFound;
+
+type PreAggJobStatusObject = {
+  [token: string]: Omit<PreAggJobStatusItem, 'token'>
+};
+
+type PreAggJobStatusResponse =
+  | PreAggJobStatusItem[]
+  | PreAggJobStatusObject;
 
 export {
   RequestContext,
   RequestExtension,
   ExtendedRequestContext,
   Request,
+  SqlApiRequest,
   QueryRewriteFn,
   SecurityContextExtractorFn,
   ExtendContextFn,
   ResponseResultFn,
+  MetaResponseResultFn,
   BaseRequest,
   QueryRequest,
+  PreAggsJobsRequest,
+  PreAggsSelector,
+  PreAggJob,
+  PreAggJobStatusItem,
+  PreAggJobStatusObject,
+  PreAggJobStatusResponse,
 };

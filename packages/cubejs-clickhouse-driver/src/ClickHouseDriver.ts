@@ -1,19 +1,33 @@
-/* eslint-disable no-restricted-syntax */
+/**
+ * @copyright Cube Dev, Inc.
+ * @license Apache-2.0
+ * @fileoverview The `ClickHouseDriver` and related types declaration.
+ */
+
+import {
+  getEnv,
+  assertDataSource,
+} from '@cubejs-backend/shared';
 import {
   BaseDriver,
   DownloadQueryResultsOptions,
   DownloadQueryResultsResult,
+  DownloadTableCSVData,
+  DriverCapabilities,
   DriverInterface,
+  QuerySchemasResult,
   StreamOptions,
   StreamTableDataWithTypes,
+  TableStructure,
+  UnloadOptions,
 } from '@cubejs-backend/base-driver';
-import { getEnv } from '@cubejs-backend/shared';
 import genericPool, { Pool } from 'generic-pool';
 import { v4 as uuidv4 } from 'uuid';
 import sqlstring from 'sqlstring';
-import { HydrationStream } from './HydrationStream';
 
-const ClickHouse = require('@apla/clickhouse');
+import { HydrationStream, transformRow } from './HydrationStream';
+
+const ClickHouse = require('@cubejs-backend/apla-clickhouse');
 
 const ClickhouseTypeToGeneric: Record<string, string> = {
   enum: 'text',
@@ -35,6 +49,9 @@ const ClickhouseTypeToGeneric: Record<string, string> = {
   // floats
   float32: 'float',
   float64: 'double',
+  // We don't support enums
+  enum8: 'text',
+  enum16: 'text',
 };
 
 interface ClickHouseDriverOptions {
@@ -45,7 +62,20 @@ interface ClickHouseDriverOptions {
   database?: string,
   readOnly?: boolean,
   queryOptions?: object,
-  maxPoolSize?: number,
+}
+
+interface ClickhouseDriverExportRequiredAWS {
+  bucketType: 's3',
+  bucketName: string,
+  region: string,
+}
+
+interface ClickhouseDriverExportKeySecretAWS extends ClickhouseDriverExportRequiredAWS {
+  keyId?: string,
+  secretKey?: string,
+}
+
+interface ClickhouseDriverExportAWS extends ClickhouseDriverExportKeySecretAWS {
 }
 
 export class ClickHouseDriver extends BaseDriver implements DriverInterface {
@@ -62,20 +92,62 @@ export class ClickHouseDriver extends BaseDriver implements DriverInterface {
 
   protected readonly config: any;
 
-  public constructor(config: ClickHouseDriverOptions = {}) {
-    super();
+  /**
+   * Class constructor.
+   */
+  public constructor(
+    config: ClickHouseDriverOptions & {
+      /**
+       * Data source name.
+       */
+      dataSource?: string,
+
+      /**
+       * Max pool size value for the [cube]<-->[db] pool.
+       */
+      maxPoolSize?: number,
+
+      /**
+       * Time to wait for a response from a connection after validation
+       * request before determining it as not valid. Default - 10000 ms.
+       */
+      testConnectionTimeout?: number,
+    } = {},
+  ) {
+    super({
+      testConnectionTimeout: config.testConnectionTimeout,
+    });
+
+    const dataSource =
+      config.dataSource ||
+      assertDataSource('default');
 
     this.config = {
-      host: process.env.CUBEJS_DB_HOST,
-      port: process.env.CUBEJS_DB_PORT,
-      auth: process.env.CUBEJS_DB_USER || process.env.CUBEJS_DB_PASS ? `${process.env.CUBEJS_DB_USER}:${process.env.CUBEJS_DB_PASS}` : '',
-      protocol: getEnv('dbSsl') ? 'https:' : 'http:',
+      host: getEnv('dbHost', { dataSource }),
+      port: getEnv('dbPort', { dataSource }),
+      auth:
+        getEnv('dbUser', { dataSource }) ||
+        getEnv('dbPass', { dataSource })
+          ? `${
+            getEnv('dbUser', { dataSource })
+          }:${
+            getEnv('dbPass', { dataSource })
+          }`
+          : '',
+      protocol: getEnv('dbSsl', { dataSource }) ? 'https:' : 'http:',
       queryOptions: {
-        database: process.env.CUBEJS_DB_NAME || config && config.database || 'default'
+        database:
+          getEnv('dbName', { dataSource }) ||
+          config && config.database ||
+          'default'
       },
+      exportBucket: this.getExportBucket(dataSource),
       ...config
     };
-    this.readOnlyMode = process.env.CUBEJS_DB_CLICKHOUSE_READONLY === 'true';
+
+    this.readOnlyMode =
+      getEnv('clickhouseReadOnly', { dataSource }) === 'true';
+
     this.pool = genericPool.createPool({
       create: async () => new ClickHouse({
         ...this.config,
@@ -95,7 +167,10 @@ export class ClickHouseDriver extends BaseDriver implements DriverInterface {
       destroy: () => Promise.resolve()
     }, {
       min: 0,
-      max: this.config.maxPoolSize || 8,
+      max:
+        config.maxPoolSize ||
+        getEnv('dbMaxPoolSize', { dataSource }) ||
+        8,
       evictionRunIntervalMillis: 10000,
       softIdleTimeoutMillis: 30000,
       idleTimeoutMillis: 30000,
@@ -142,7 +217,9 @@ export class ClickHouseDriver extends BaseDriver implements DriverInterface {
   }
 
   public readOnly() {
-    return !!this.config.readOnly || this.readOnlyMode;
+    return (this.config.readOnly != null || this.readOnlyMode) ?
+      (!!this.config.readOnly || this.readOnlyMode) :
+      true;
   }
 
   public async query(query: string, values: unknown[]) {
@@ -169,30 +246,14 @@ export class ClickHouseDriver extends BaseDriver implements DriverInterface {
   }
 
   protected normaliseResponse(res: any) {
-    //
-    //
-    //  ClickHouse returns DateTime as strings in format "YYYY-DD-MM HH:MM:SS"
-    //  cube.js expects them in format "YYYY-DD-MMTHH:MM:SS.000", so translate them based on the metadata returned
-    //
-    //  ClickHouse returns some number types as js numbers, others as js string, normalise them all to strings
-    //
-    //
     if (res.data) {
+      const meta = res.meta.reduce(
+        (state: any, element: any) => ({ [element.name]: element, ...state }),
+        {}
+      );
+
       res.data.forEach((row: any) => {
-        Object.keys(row).forEach(field => {
-          const value = row[field];
-          if (value !== null) {
-            const meta = res.meta.find((m: any) => m.name === field);
-            if (meta.type.includes('DateTime')) {
-              row[field] = `${value.substring(0, 10)}T${value.substring(11, 22)}.000`;
-            } else if (meta.type.includes('Date')) {
-              row[field] = `${value}T00:00:00.000`;
-            } else if (meta.type.includes('Int') || meta.type.includes('Float') || meta.type.includes('Decimal')) {
-              // convert all numbers into strings
-              row[field] = `${value}`;
-            }
-          }
-        });
+        transformRow(row, meta);
       });
     }
     return res.data;
@@ -212,6 +273,40 @@ export class ClickHouseDriver extends BaseDriver implements DriverInterface {
         FROM system.columns
        WHERE database = '${this.config.queryOptions.database}'
     `;
+  }
+
+  protected override getTablesForSpecificSchemasQuery(schemasPlaceholders: string) {
+    const query = `
+      SELECT database as schema_name,
+            name as table_name
+      FROM system.tables
+      WHERE database IN (${schemasPlaceholders})
+    `;
+    return query;
+  }
+
+  protected override getColumnsForSpecificTablesQuery(conditionString: string) {
+    const query = `
+      SELECT name as ${this.quoteIdentifier('column_name')},
+             table as ${this.quoteIdentifier('table_name')},
+             database as ${this.quoteIdentifier('schema_name')},
+             type as ${this.quoteIdentifier('data_type')}
+      FROM system.columns
+      WHERE ${conditionString}
+    `;
+    return query;
+  }
+
+  protected override getColumnNameForSchemaName() {
+    return 'database';
+  }
+
+  protected override getColumnNameForTableName() {
+    return 'table';
+  }
+
+  public override async getSchemas(): Promise<QuerySchemasResult[]> {
+    return [{ schema_name: this.config.queryOptions.database }];
   }
 
   public async stream(
@@ -303,7 +398,7 @@ export class ClickHouseDriver extends BaseDriver implements DriverInterface {
      * Nullable(DateTime('UTC'))
      */
     if (columnType.includes('(')) {
-      const types = columnType.toLowerCase().match(/([a-z']+)/g);
+      const types = columnType.toLowerCase().match(/([a-z0-9']+)/g);
       if (types) {
         for (const type of types) {
           if (type in ClickhouseTypeToGeneric) {
@@ -316,11 +411,138 @@ export class ClickHouseDriver extends BaseDriver implements DriverInterface {
     return super.toGenericType(columnType);
   }
 
-  public async createSchemaIfNotExists(schemaName: string): Promise<unknown[]> {
-    return this.query(`CREATE DATABASE IF NOT EXISTS ${schemaName}`, []);
+  public async createSchemaIfNotExists(schemaName: string): Promise<void> {
+    await this.query(`CREATE DATABASE IF NOT EXISTS ${schemaName}`, []);
   }
 
   public getTablesQuery(schemaName: string) {
     return this.query('SELECT name as table_name FROM system.tables WHERE database = ?', [schemaName]);
+  }
+
+  protected getExportBucket(
+    dataSource: string,
+  ): ClickhouseDriverExportAWS | undefined {
+    const supportedBucketTypes = ['s3'];
+
+    const requiredExportBucket: ClickhouseDriverExportRequiredAWS = {
+      bucketType: getEnv('dbExportBucketType', {
+        supported: supportedBucketTypes,
+        dataSource,
+      }),
+      bucketName: getEnv('dbExportBucket', { dataSource }),
+      region: getEnv('dbExportBucketAwsRegion', { dataSource }),
+    };
+
+    const exportBucket: Partial<ClickhouseDriverExportAWS> = {
+      ...requiredExportBucket,
+      keyId: getEnv('dbExportBucketAwsKey', { dataSource }),
+      secretKey: getEnv('dbExportBucketAwsSecret', { dataSource }),
+    };
+
+    if (exportBucket.bucketType) {
+      if (!supportedBucketTypes.includes(exportBucket.bucketType)) {
+        throw new Error(
+          `Unsupported EXPORT_BUCKET_TYPE, supported: ${supportedBucketTypes.join(',')}`
+        );
+      }
+
+      // Make sure the required keys are set
+      const emptyRequiredKeys = Object.keys(requiredExportBucket)
+        .filter((key: string) => requiredExportBucket[<keyof ClickhouseDriverExportRequiredAWS>key] === undefined);
+      if (emptyRequiredKeys.length) {
+        throw new Error(
+          `Unsupported configuration exportBucket, some configuration keys are empty: ${emptyRequiredKeys.join(',')}`
+        );
+      }
+
+      return exportBucket as ClickhouseDriverExportAWS;
+    }
+
+    return undefined;
+  }
+
+  public async isUnloadSupported() {
+    if (this.config.exportBucket) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Returns an array of queried fields meta info.
+   */
+  public async queryColumnTypes(sql: string, params: unknown[]): Promise<TableStructure> {
+    const columns = await this.query(`DESCRIBE ${sql}`, params);
+    if (!columns) {
+      throw new Error('Unable to describe table');
+    }
+
+    return columns.map((column: any) => ({
+      name: column.name,
+      type: this.toGenericType(column.type),
+    }));
+  }
+
+  /**
+   * We use unloadWithoutTempTable strategy
+   */
+  public async unload(_tableName: string, options: UnloadOptions): Promise<DownloadTableCSVData> {
+    if (!options.query?.sql) {
+      throw new Error('Query must be defined in options');
+    }
+
+    return this.unloadFromQuery(
+      options.query?.sql,
+      options.query?.params,
+      options
+    );
+  }
+
+  public async unloadFromQuery(sql: string, params: unknown[], options: UnloadOptions): Promise<DownloadTableCSVData> {
+    if (!this.config.exportBucket) {
+      throw new Error('Unload is not configured');
+    }
+
+    const types = await this.queryColumnTypes(`(${sql})`, params);
+    const exportPrefix = uuidv4();
+
+    await this.queryResponse(`
+      INSERT INTO FUNCTION
+         s3(
+             'https://${this.config.exportBucket.bucketName}.s3.${this.config.exportBucket.region}.amazonaws.com/${exportPrefix}/export.csv.gz',
+             '${this.config.exportBucket.keyId}',
+             '${this.config.exportBucket.secretKey}',
+             'CSV'
+          )
+      ${sql}
+    `, params);
+
+    const csvFile = await this.extractUnloadedFilesFromS3(
+      {
+        credentials: {
+          accessKeyId: this.config.exportBucket.keyId,
+          secretAccessKey: this.config.exportBucket.secretKey,
+        },
+        region: this.config.exportBucket.region,
+      },
+      this.config.exportBucket.bucketName,
+      exportPrefix,
+    );
+
+    return {
+      csvFile,
+      types,
+      csvNoHeader: true,
+      // Can be controlled via SET format_csv_delimiter
+      csvDelimiter: ','
+    };
+  }
+
+  public capabilities(): DriverCapabilities {
+    return {
+      unloadWithoutTempTable: true,
+      incrementalSchemaLoading: true,
+    };
   }
 }

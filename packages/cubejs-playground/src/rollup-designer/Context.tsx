@@ -1,4 +1,4 @@
-import { CubejsApi, Query, TransformedQuery } from '@cubejs-client/core';
+import { CubeApi, Query, TransformedQuery } from '@cubejs-client/core';
 import { AvailableMembers, useCubeMeta, useDryRun } from '@cubejs-client/react';
 import {
   createContext,
@@ -9,6 +9,7 @@ import {
 } from 'react';
 
 import { useToggle } from '../hooks';
+import { SchemaFormat } from '../types';
 import { RollupDesignerModal } from './components/RollupDesignerModal';
 
 type RollupDesignerContextValue = {
@@ -21,6 +22,7 @@ type RollupDesignerContextValue = {
   setQuery: (query: Query | null) => void;
   transformedQuery: TransformedQuery | null;
   setTransformedQuery: (transformedQuery: TransformedQuery | null) => void;
+  defaultSchemaFormat: SchemaFormat
 };
 
 export const Context = createContext<RollupDesignerContextValue>(
@@ -30,12 +32,13 @@ export const Context = createContext<RollupDesignerContextValue>(
 type ContextProps = {
   apiUrl: string;
   children: ReactNode;
-  cubejsApi?: CubejsApi;
+  cubeApi?: CubeApi;
   token?: string;
+  defaultSchemaFormat?: SchemaFormat
 };
 
 export function RollupDesignerContext({
-  cubejsApi,
+  cubeApi,
   children,
   ...props
 }: ContextProps) {
@@ -53,11 +56,11 @@ export function RollupDesignerContext({
 
   const metaResult = useCubeMeta({
     skip: !isModalOpen,
-    cubejsApi,
+    cubeApi,
   });
   const dryRunResult = useDryRun(query as Query, {
     skip: !isModalOpen || !query,
-    cubejsApi,
+    cubeApi,
   });
 
   useEffect(() => {
@@ -101,6 +104,7 @@ export function RollupDesignerContext({
         setTransformedQuery,
         memberTypeCubeMap,
         error,
+        defaultSchemaFormat: props.defaultSchemaFormat || SchemaFormat.js
       }}
     >
       {children}
