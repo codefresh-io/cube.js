@@ -1659,12 +1659,6 @@ const variables: Record<string, (...args: any) => any> = {
   redisRejectUnauthorized: () => get('CUBEJS_REDIS_REJECT_UNAUTHORIZED')
     .asBool(),
   //
-  dbSsl: () => get('CUBEJS_DB_SSL')
-    .default('false')
-    .asBoolStrict(),
-  dbSslRejectUnauthorized: () => get('CUBEJS_DB_SSL_REJECT_UNAUTHORIZED')
-    .default('false')
-    .asBoolStrict(),
   nodeEnv: () => get('NODE_ENV')
     .asString(),
   cacheAndQueueDriver: () => get('CUBEJS_CACHE_AND_QUEUE_DRIVER')
