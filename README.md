@@ -9,15 +9,17 @@ CI part will take place from github actions. and not from codefresh pipeline onc
 ### CD
 CD part will take place from codefresh pipeline and will only publish specific packages that were defined in the codefresh.yml
 
-### how to add another new package in case we need
+### how to add another new package in case we need(ordered)
 1. make change in the package.json of the specific required new package and rename the original name. take a look on how we did it for cubejs-bigquery-driver
 2. add another step in the codefresh.yml so that the new package will be pushed to our npm
 
 ### What packages are we publishing atm
-1. [server-core](https://github.com/codefresh-io/cube.js/blob/master/packages/cubejs-server-core/package.json), [@codefresh-io/cubejs-backend-server-core](https://www.npmjs.com/package/@codefresh-io/cubejs-backend-server-core)
+1. [cubejs-backend-shared](https://github.com/codefresh-io/cube.js/tree/master/packages/cubejs-backend-shared), [@codefresh-io/cubejs-backend-shared](https://www.npmjs.com/package/@codefresh-io/cubejs-backend-shared)
 2. [cbuejs-bigquery-driver](https://github.com/codefresh-io/cube.js/tree/master/packages/cubejs-bigquery-driver), [@codefresh-io/cubejs-backend-bigquery-driver](https://www.npmjs.com/package/@codefresh-io/cubejs-backend-bigquery-driver)
 3. [cubejs-postgres-driver](https://github.com/codefresh-io/cube.js/tree/master/packages/cubejs-postgres-driver), [@codefresh-io/cubejs-backend-postgres-driver
    ](https://www.npmjs.com/package/@codefresh-io/cubejs-backend-postgres-driver)
+4. [cubejs-backend-query-orchestrator](https://github.com/codefresh-io/cube.js/tree/master/packages/cubejs-query-orchestrator), [@codefresh-io/cubejs-backend-query-orchestrator](https://www.npmjs.com/package/@codefresh-io/cubejs-backend-query-orchestrator)  
+5. [server-core](https://github.com/codefresh-io/cube.js/blob/master/packages/cubejs-server-core/package.json), [@codefresh-io/cubejs-backend-server-core](https://www.npmjs.com/package/@codefresh-io/cubejs-backend-server-core)
 
 ### How to use packages 
 1. We need to keep real names of packages when using the published packages, so since we are publishing with different name, other places in cube js code aren't aware of this name and this causing issues on runtime.

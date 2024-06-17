@@ -1,6 +1,6 @@
 {
   "name": "cf-cubejs",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "",
   "workspaces": {
     "packages": [
@@ -16,7 +16,7 @@
   "scripts": {
     "build": "rollup -c",
     "watch": "rollup -c -w",
-    "watch-local": "CUBEJS_API_URL=http://localhost:6020/cubejs-api/v1 rollup -c -w",
+    "watch-local": "CUBEJS_API_URL=http://localhost:6020/cubejs-api/v1 rollup -c -w", 
     "lint:npm": "yarn npmPkgJsonLint packages/*/package.json rust/package.json",
     "lint": "yarn lint:npm && yarn lerna run lint",
     "lint:fix": "lerna run lint:fix",
