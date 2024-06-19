@@ -14,12 +14,19 @@ CD part will take place from codefresh pipeline and will only publish specific p
 2. add another step in the codefresh.yml so that the new package will be pushed to our npm
 
 ### What packages are we publishing atm
-1. [cubejs-backend-shared](https://github.com/codefresh-io/cube.js/tree/master/packages/cubejs-backend-shared), [@codefresh-io/cubejs-backend-shared](https://www.npmjs.com/package/@codefresh-io/cubejs-backend-shared)
-2. [cbuejs-bigquery-driver](https://github.com/codefresh-io/cube.js/tree/master/packages/cubejs-bigquery-driver), [@codefresh-io/cubejs-backend-bigquery-driver](https://www.npmjs.com/package/@codefresh-io/cubejs-backend-bigquery-driver)
-3. [cubejs-postgres-driver](https://github.com/codefresh-io/cube.js/tree/master/packages/cubejs-postgres-driver), [@codefresh-io/cubejs-backend-postgres-driver
-   ](https://www.npmjs.com/package/@codefresh-io/cubejs-backend-postgres-driver)
-4. [cubejs-backend-query-orchestrator](https://github.com/codefresh-io/cube.js/tree/master/packages/cubejs-query-orchestrator), [@codefresh-io/cubejs-backend-query-orchestrator](https://www.npmjs.com/package/@codefresh-io/cubejs-backend-query-orchestrator)  
-5. [server-core](https://github.com/codefresh-io/cube.js/blob/master/packages/cubejs-server-core/package.json), [@codefresh-io/cubejs-backend-server-core](https://www.npmjs.com/package/@codefresh-io/cubejs-backend-server-core)
+1. [cubejs-backend-shared](https://github.com/codefresh-io/cube.js/tree/master/packages/cubejs-backend-shared), [@codefresh-io/cubejs-backend-shared](https://www.npmjs.com/package/@codefresh-io/cubejs-backend-shared)  
+**files were changed:**  
+packages/cubejs-backend-shared/src/env.ts
+2. [cubejs-backend-base-driver](https://github.com/codefresh-io/cube.js/tree/master/packages/cubejs-base-driver), [@codefresh-io/cubejs-backend-base-driver](https://www.npmjs.com/package/@codefresh-io/cubejs-backend-base-driver)
+3. [cbuejs-bigquery-driver](https://github.com/codefresh-io/cube.js/tree/master/packages/cubejs-bigquery-driver), [@codefresh-io/cubejs-backend-bigquery-driver](https://www.npmjs.com/package/@codefresh-io/cubejs-backend-bigquery-driver)
+4. [cubejs-postgres-driver](https://github.com/codefresh-io/cube.js/tree/master/packages/cubejs-postgres-driver), [@codefresh-io/cubejs-backend-postgres-driver](https://www.npmjs.com/package/@codefresh-io/cubejs-backend-postgres-driver)  
+**files were changed:**  
+packages/cubejs-postgres-driver/src/PostgresDriver.ts
+5. [cubejs-backend-query-orchestrator](https://github.com/codefresh-io/cube.js/tree/master/packages/cubejs-query-orchestrator), [@codefresh-io/cubejs-backend-query-orchestrator](https://www.npmjs.com/package/@codefresh-io/cubejs-backend-query-orchestrator)   
+**files were changed:**  
+ packages/cubejs-query-orchestrator/src/orchestrator/IORedisFactory.ts
+ packages/cubejs-query-orchestrator/src/orchestrator/RedisFactory.ts
+6. [server-core](https://github.com/codefresh-io/cube.js/blob/master/packages/cubejs-server-core/package.json), [@codefresh-io/cubejs-backend-server-core](https://www.npmjs.com/package/@codefresh-io/cubejs-backend-server-core)
 
 ### How to use packages 
 1. We need to keep real names of packages when using the published packages, so since we are publishing with different name, other places in cube js code aren't aware of this name and this causing issues on runtime.
