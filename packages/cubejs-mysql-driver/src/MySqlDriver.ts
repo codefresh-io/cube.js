@@ -1,3 +1,13 @@
+/**
+ * @copyright Cube Dev, Inc.
+ * @license Apache-2.0
+ * @fileoverview The `MySqlDriver` and related types declaration.
+ */
+
+import {
+  getEnv,
+  assertDataSource,
+} from '@cubejs-backend/shared';
 import mysql, { Connection, ConnectionConfig, FieldInfo, QueryOptions } from 'mysql';
 import genericPool from 'generic-pool';
 import { promisify } from 'util';
@@ -6,7 +16,12 @@ import {
   GenericDataBaseType,
   DriverInterface,
   StreamOptions,
-  DownloadQueryResultsOptions, TableStructure, DownloadTableData, IndexesSQL, DownloadTableMemoryData,
+  DownloadQueryResultsOptions,
+  TableStructure,
+  DownloadTableData,
+  IndexesSQL,
+  DownloadTableMemoryData,
+  DriverCapabilities,
 } from '@cubejs-backend/base-driver';
 
 const GenericTypeToMySql: Record<GenericDataBaseType, string> = {
@@ -56,7 +71,6 @@ export interface MySqlDriverConfiguration extends ConnectionConfig {
   readOnly?: boolean,
   loadPreAggregationWithoutMetaLock?: boolean,
   storeTimezone?: string,
-  maxPoolSize?: number,
   pool?: any,
 }
 
@@ -64,6 +78,9 @@ interface MySQLConnection extends Connection {
   execute: (options: string | QueryOptions, values?: any) => Promise<any>
 }
 
+/**
+ * MySQL driver class.
+ */
 export class MySqlDriver extends BaseDriver implements DriverInterface {
   /**
    * Returns default concurrency value.
@@ -76,25 +93,50 @@ export class MySqlDriver extends BaseDriver implements DriverInterface {
 
   protected readonly pool: genericPool.Pool<MySQLConnection>;
 
-  public constructor(config: MySqlDriverConfiguration = {}) {
-    super();
+  /**
+   * Class constructor.
+   */
+  public constructor(
+    config: MySqlDriverConfiguration & {
+      /**
+       * Data source name.
+       */
+      dataSource?: string,
+
+      /**
+       * Max pool size value for the [cube]<-->[db] pool.
+       */
+      maxPoolSize?: number,
+
+      /**
+       * Time to wait for a response from a connection after validation
+       * request before determining it as not valid. Default - 10000 ms.
+       */
+      testConnectionTimeout?: number,
+    } = {}
+  ) {
+    super({
+      testConnectionTimeout: config.testConnectionTimeout,
+    });
+
+    const dataSource =
+      config.dataSource ||
+      assertDataSource('default');
 
     const { pool, ...restConfig } = config;
-
     this.config = {
-      host: process.env.CUBEJS_DB_HOST,
-      database: process.env.CUBEJS_DB_NAME,
-      port: <any>process.env.CUBEJS_DB_PORT,
-      user: process.env.CUBEJS_DB_USER,
-      password: process.env.CUBEJS_DB_PASS,
-      socketPath: process.env.CUBEJS_DB_SOCKET_PATH,
+      host: getEnv('dbHost', { dataSource }),
+      database: getEnv('dbName', { dataSource }),
+      port: getEnv('dbPort', { dataSource }),
+      user: getEnv('dbUser', { dataSource }),
+      password: getEnv('dbPass', { dataSource }),
+      socketPath: getEnv('dbSocketPath', { dataSource }),
       timezone: 'Z',
-      ssl: this.getSslOptions(),
+      ssl: this.getSslOptions(dataSource),
       dateStrings: true,
       readOnly: true,
       ...restConfig,
     };
-
     this.pool = genericPool.createPool({
       create: async () => {
         const conn: any = mysql.createConnection(this.config);
@@ -124,8 +166,9 @@ export class MySqlDriver extends BaseDriver implements DriverInterface {
     }, {
       min: 0,
       max:
-        process.env.CUBEJS_DB_MAX_POOL && parseInt(process.env.CUBEJS_DB_MAX_POOL, 10) ||
-        config.maxPoolSize || 8,
+        config.maxPoolSize ||
+        getEnv('dbMaxPoolSize', { dataSource }) ||
+        8,
       evictionRunIntervalMillis: 10000,
       softIdleTimeoutMillis: 30000,
       idleTimeoutMillis: 30000,
@@ -133,6 +176,41 @@ export class MySqlDriver extends BaseDriver implements DriverInterface {
       acquireTimeoutMillis: 20000,
       ...pool
     });
+  }
+
+  protected primaryKeysQuery(conditionString?: string): string | null {
+    return `SELECT
+      TABLE_SCHEMA as ${this.quoteIdentifier('table_schema')}, 
+      TABLE_NAME as ${this.quoteIdentifier('table_name')},
+      COLUMN_NAME as ${this.quoteIdentifier('column_name')}
+  FROM
+      information_schema.KEY_COLUMN_USAGE
+  WHERE
+      CONSTRAINT_NAME = 'PRIMARY'
+      AND TABLE_SCHEMA NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+      ${conditionString ? ` AND (${conditionString})` : ''}
+  ORDER BY
+      TABLE_SCHEMA,
+      TABLE_NAME,
+      ORDINAL_POSITION;`;
+  }
+
+  protected foreignKeysQuery(conditionString?: string): string | null {
+    return `SELECT
+        tc.table_schema as ${this.quoteIdentifier('table_schema')},
+        tc.table_name as ${this.quoteIdentifier('table_name')},
+        kcu.column_name as ${this.quoteIdentifier('column_name')},
+        columns.table_name as ${this.quoteIdentifier('target_table')},
+        columns.column_name as ${this.quoteIdentifier('target_column')}
+    FROM
+        information_schema.table_constraints AS tc
+    JOIN information_schema.key_column_usage AS kcu
+        ON tc.constraint_name = kcu.constraint_name
+    JOIN information_schema.key_column_usage AS columns
+        ON columns.constraint_name = tc.constraint_name
+    WHERE
+        columns.table_name NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys')
+        AND tc.constraint_type = 'FOREIGN KEY'${conditionString ? ` AND (${conditionString})` : ''};`;
   }
 
   public readOnly() {
@@ -364,5 +442,11 @@ export class MySqlDriver extends BaseDriver implements DriverInterface {
     return MySqlToGenericType[columnType.toLowerCase()] ||
       MySqlToGenericType[columnType.toLowerCase().split('(')[0]] ||
       super.toGenericType(columnType);
+  }
+
+  public capabilities(): DriverCapabilities {
+    return {
+      incrementalSchemaLoading: true,
+    };
   }
 }

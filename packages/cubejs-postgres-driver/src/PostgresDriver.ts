@@ -1,19 +1,29 @@
+/**
+ * @copyright Cube Dev, Inc.
+ * @license Apache-2.0
+ * @fileoverview The `PostgresDriver` and related types declaration.
+ */
+
+import {
+  getEnv,
+  assertDataSource,
+} from '@cubejs-backend/shared';
 import { types, Pool, PoolConfig, PoolClient, FieldDef } from 'pg';
 // eslint-disable-next-line import/no-extraneous-dependencies
 import { TypeId, TypeFormat } from 'pg-types';
-import { getEnv } from '@cubejs-backend/shared';
 import * as moment from 'moment';
 import {
   BaseDriver,
   DownloadQueryResultsOptions, DownloadTableMemoryData, DriverInterface,
   GenericDataBaseType, IndexesSQL, TableStructure, StreamOptions,
-  StreamTableDataWithTypes, QueryOptions, DownloadQueryResultsResult,
+  StreamTableDataWithTypes, QueryOptions, DownloadQueryResultsResult, DriverCapabilities,
 } from '@cubejs-backend/base-driver';
 import { QueryStream } from './QueryStream';
 
 const GenericTypeToPostgres: Record<GenericDataBaseType, string> = {
   string: 'text',
   double: 'decimal',
+  //Codefresh needs this to fix postgresql pre-aggregation issue
   int: 'int8',
   // Revert mapping for internal pre-aggregations
   HLL_POSTGRES: 'hll',
@@ -53,10 +63,16 @@ export type PostgresDriverConfiguration = Partial<PoolConfig> & {
   storeTimezone?: string,
   executionTimeout?: number,
   readOnly?: boolean,
-} & {
-  maxPoolSize?: number
+
+  /**
+   * The export bucket CSV file escape symbol.
+   */
+  exportBucketCsvEscapeSymbol?: string,
 };
 
+/**
+ * Postgres driver class.
+ */
 export class PostgresDriver<Config extends PostgresDriverConfiguration = PostgresDriverConfiguration>
   extends BaseDriver implements DriverInterface {
   /**
@@ -66,44 +82,108 @@ export class PostgresDriver<Config extends PostgresDriverConfiguration = Postgre
     return 2;
   }
 
+  private enabled: boolean = false;
+
   protected readonly pool: Pool;
 
   protected readonly config: Partial<Config>;
 
+  /**
+   * Class constructor.
+   */
   public constructor(
-    config: Partial<Config> = {}
-  ) {
-    super();
+    config: Partial<Config> & {
+      /**
+       * Data source name.
+       */
+      dataSource?: string,
 
+      /**
+       * Max pool size value for the [cube]<-->[db] pool.
+       */
+      maxPoolSize?: number,
+
+      /**
+       * Time to wait for a response from a connection after validation
+       * request before determining it as not valid. Default - 10000 ms.
+       */
+      testConnectionTimeout?: number,
+    } = {}
+  ) {
+    super({
+      testConnectionTimeout: config.testConnectionTimeout,
+    });
+
+    const dataSource =
+      config.dataSource ||
+      assertDataSource('default');
+    
     this.pool = new Pool({
-      max:
-        process.env.CUBEJS_DB_MAX_POOL && parseInt(process.env.CUBEJS_DB_MAX_POOL, 10) ||
-        config.maxPoolSize || 8,
       idleTimeoutMillis: 30000,
-      host: process.env.CUBEJS_DB_HOST,
-      database: process.env.CUBEJS_DB_NAME,
-      port: <any>process.env.CUBEJS_DB_PORT,
-      user: process.env.CUBEJS_DB_USER,
-      password: process.env.CUBEJS_DB_PASS,
-      ssl: this.getSslOptions(),
+      max:
+        config.maxPoolSize ||
+        getEnv('dbMaxPoolSize', { dataSource }) ||
+        8,
+      host: getEnv('dbHost', { dataSource }),
+      database: getEnv('dbName', { dataSource }),
+      port: getEnv('dbPort', { dataSource }),
+      user: getEnv('dbUser', { dataSource }),
+      password: getEnv('dbPass', { dataSource }),
+      ssl: this.getSslOptions(dataSource),
       ...config
     });
     this.pool.on('error', (err) => {
       console.log(`Unexpected error on idle client: ${err.stack || err}`); // TODO
     });
-
-    this.config = {
-      ...this.getInitialConfiguration(),
-      executionTimeout: getEnv('dbQueryTimeout'),
+    this.config = <Partial<Config>>{
+      ...this.getInitialConfiguration(dataSource),
+      executionTimeout: getEnv('dbQueryTimeout', { dataSource }),
+      exportBucketCsvEscapeSymbol: getEnv('dbExportBucketCsvEscapeSymbol', { dataSource }),
       ...config,
     };
+    this.enabled = true;
+  }
+
+  protected primaryKeysQuery(conditionString?: string): string | null {
+    return `SELECT 
+      columns.table_schema as ${this.quoteIdentifier('table_schema')},
+      columns.table_name as ${this.quoteIdentifier('table_name')}, 
+      columns.column_name as ${this.quoteIdentifier('column_name')}
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.constraint_column_usage AS ccu USING (constraint_schema, constraint_name)
+    JOIN information_schema.columns AS columns ON columns.table_schema = tc.constraint_schema
+      AND tc.table_name = columns.table_name AND ccu.column_name = columns.column_name
+    WHERE constraint_type = 'PRIMARY KEY' AND columns.table_schema NOT IN ('pg_catalog', 'information_schema', 'mysql', 'performance_schema', 'sys', 'INFORMATION_SCHEMA')${conditionString ? ` AND (${conditionString})` : ''}`;
+  }
+
+  protected foreignKeysQuery(conditionString?: string): string | null {
+    return `SELECT
+        tc.table_schema as ${this.quoteIdentifier('table_schema')},
+        tc.table_name as ${this.quoteIdentifier('table_name')},
+        kcu.column_name as ${this.quoteIdentifier('column_name')},
+        columns.table_name as ${this.quoteIdentifier('target_table')},
+        columns.column_name as ${this.quoteIdentifier('target_column')}
+      FROM
+        information_schema.table_constraints AS tc
+      JOIN information_schema.key_column_usage AS kcu
+        ON tc.constraint_name = kcu.constraint_name
+      JOIN information_schema.constraint_column_usage AS columns
+        ON columns.constraint_name = tc.constraint_name
+      WHERE
+         constraint_type = 'FOREIGN KEY'
+         AND ${this.getColumnNameForSchemaName()} NOT IN ('pg_catalog', 'information_schema', 'mysql', 'performance_schema', 'sys', 'INFORMATION_SCHEMA')
+         ${conditionString ? ` AND (${conditionString})` : ''}
+    `;
   }
 
   /**
    * The easiest way how to add additional configuration from env variables, because
    * you cannot call method in RedshiftDriver.constructor before super.
    */
-  protected getInitialConfiguration(): Partial<PostgresDriverConfiguration> {
+  protected getInitialConfiguration(
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    dataSource: string,
+  ): Partial<PostgresDriverConfiguration> {
     return {
       readOnly: true,
     };
@@ -227,11 +307,11 @@ export class PostgresDriver<Config extends PostgresDriverConfiguration = Postgre
         highWaterMark
       });
       const rowStream: QueryStream = await conn.query(queryStream);
-      const meta = await rowStream.fields();
+      const fields = await await rowStream.fields();
 
       return {
         rowStream,
-        types: this.mapFields(meta),
+        types: this.mapFields(fields),
         release: async () => {
           await conn.release();
         }
@@ -322,8 +402,11 @@ export class PostgresDriver<Config extends PostgresDriverConfiguration = Postgre
     }
   }
 
-  public release() {
-    return this.pool.end();
+  public async release() {
+    if (this.enabled) {
+      this.pool.end();
+      this.enabled = false;
+    }
   }
 
   public param(paramIndex: number) {
@@ -332,5 +415,11 @@ export class PostgresDriver<Config extends PostgresDriverConfiguration = Postgre
 
   public fromGenericType(columnType: string) {
     return GenericTypeToPostgres[columnType] || super.fromGenericType(columnType);
+  }
+
+  public capabilities(): DriverCapabilities {
+    return {
+      incrementalSchemaLoading: true,
+    };
   }
 }

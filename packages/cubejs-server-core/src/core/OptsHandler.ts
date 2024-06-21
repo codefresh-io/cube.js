@@ -1,10 +1,9 @@
 import crypto from 'crypto';
-import fs from 'fs-extra';
-import path from 'path';
 import cloneDeep from 'lodash.clonedeep';
 import { BaseDriver } from '@cubejs-backend/query-orchestrator';
 import {
   getEnv,
+  assertDataSource,
   isDockerImage,
   displayCLIWarning,
 } from '@cubejs-backend/shared';
@@ -85,7 +84,7 @@ export class OptsHandler {
         'must be specified'
       );
     }
-    
+
     // TODO (buntarb): this assertion should be restored after documentation
     // will be added.
     //
@@ -196,9 +195,10 @@ export class OptsHandler {
    * Default database factory function.
    */ // eslint-disable-next-line @typescript-eslint/no-unused-vars
   private defaultDriverFactory(ctx: DriverContext): DriverConfig {
-    return {
-      type: <DatabaseType>process.env.CUBEJS_DB_TYPE,
-    };
+    const type = <DatabaseType>getEnv('dbType', {
+      dataSource: assertDataSource(ctx.dataSource),
+    });
+    return { type };
   }
 
   /**
@@ -219,7 +219,7 @@ export class OptsHandler {
           );
         }
         // TODO (buntarb): wrapping this call with assertDriverFactoryResult
-        // change assertions sequince and cause a fail of few tests. Review it.
+        // change assertions sequence and cause a fail of few tests. Review it.
         return this.defaultDriverFactory(ctx);
       } else {
         return this.assertDriverFactoryResult(
@@ -298,7 +298,7 @@ export class OptsHandler {
         // concurrency specified in cube.js
         return options;
       } else {
-        const envConcurrency: number = getEnv('concurrency');
+        const envConcurrency: number = getEnv('concurrency', { dataSource });
         if (envConcurrency) {
           // concurrency specified in CUBEJS_CONCURRENCY
           return {
@@ -370,7 +370,7 @@ export class OptsHandler {
         })
       );
 
-    let externalDialectFactory = () => (
+    const externalDialectFactory = () => (
       typeof externalDbType === 'string' &&
       lookupDriverClass(externalDbType).dialectClass &&
       lookupDriverClass(externalDbType).dialectClass()
@@ -428,8 +428,6 @@ export class OptsHandler {
           // Lazy loading for Cube Store
           externalDriverFactory =
             () => new cubeStorePackage.CubeStoreDevDriver(cubeStoreHandler);
-          externalDialectFactory =
-            () => cubeStorePackage.CubeStoreDevDriver.dialectClass();
         } else {
           this.core.logger('Cube Store is not supported on your system', {
             warning: (
@@ -464,12 +462,13 @@ export class OptsHandler {
       dashboardAppPort: 3000,
       scheduledRefreshConcurrency:
         parseInt(process.env.CUBEJS_SCHEDULED_REFRESH_CONCURRENCY, 10),
+      scheduledRefreshBatchSize: getEnv('scheduledRefreshBatchSize'),
       preAggregationsSchema:
         getEnv('preAggregationsSchema') ||
         (this.isDevMode()
           ? 'dev_pre_aggregations'
           : 'prod_pre_aggregations'),
-      schemaPath: process.env.CUBEJS_SCHEMA_PATH || 'schema',
+      schemaPath: getEnv('schemaPath'),
       scheduledRefreshTimer: getEnv('refreshWorkerMode'),
       sqlCache: true,
       livePreview: getEnv('livePreview'),
@@ -500,19 +499,10 @@ export class OptsHandler {
     if (options.devServer && !options.apiSecret) {
       options.apiSecret = crypto.randomBytes(16).toString('hex');
       displayCLIWarning(
-        `Option apiSecret is required in dev mode. Cube.js has generated it as ${
+        `Option apiSecret is required in dev mode. Cube has generated it as ${
           options.apiSecret
         }`
       );
-    }
-
-    // Create schema directory to protect error on new project with dev mode
-    // (docker flow)
-    if (options.devServer) {
-      const repositoryPath = path.join(process.cwd(), options.schemaPath);
-      if (!fs.existsSync(repositoryPath)) {
-        fs.mkdirSync(repositoryPath);
-      }
     }
 
     if (!options.devServer || this.configuredForQueryProcessing()) {

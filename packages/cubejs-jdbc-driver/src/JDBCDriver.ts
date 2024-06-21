@@ -1,31 +1,58 @@
+/**
+ * @copyright Cube Dev, Inc.
+ * @license Apache-2.0
+ * @fileoverview The `JDBCDriver` and related types declaration.
+ */
+
 /* eslint-disable no-restricted-syntax,import/no-extraneous-dependencies */
-import { BaseDriver } from '@cubejs-backend/base-driver';
-import { CancelablePromise } from '@cubejs-backend/shared';
+import { Readable } from 'stream';
+import {
+  getEnv,
+  assertDataSource,
+  CancelablePromise,
+} from '@cubejs-backend/shared';
+import {
+  BaseDriver,
+  DownloadQueryResultsOptions,
+  DownloadQueryResultsResult,
+  StreamOptions,
+} from '@cubejs-backend/base-driver';
 import * as SqlString from 'sqlstring';
 import { promisify } from 'util';
 import genericPool, { Factory, Pool } from 'generic-pool';
+import path from 'path';
 
 import { DriverOptionsInterface, SupportedDrivers } from './supported-drivers';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { JDBCDriverConfiguration } from './types';
+import { QueryStream, nextFn, Row, transformRow } from './QueryStream';
 
-const DriverManager = require('jdbc/lib/drivermanager');
-const Connection = require('jdbc/lib/connection');
-const DatabaseMetaData = require('jdbc/lib/databasemetadata');
-const jinst = require('jdbc/lib/jinst');
+const DriverManager = require('@cubejs-backend/jdbc/lib/drivermanager');
+const Connection = require('@cubejs-backend/jdbc/lib/connection');
+const DatabaseMetaData = require('@cubejs-backend/jdbc/lib/databasemetadata');
+const jinst = require('@cubejs-backend/jdbc/lib/jinst');
 const mvn = require('node-java-maven');
 
 let mvnPromise: Promise<void> | null = null;
 
+type JdbcStatement = {
+  setQueryTimeout: (t: number) => any,
+  execute: (q: string) => any,
+};
+
 const initMvn = (customClassPath: any) => {
   if (!mvnPromise) {
     mvnPromise = new Promise((resolve, reject) => {
-      mvn((err: any, mvnResults: any) => {
+      const options = {
+        packageJsonPath: `${path.join(__dirname, '../..')}/package.json`,
+      };
+      mvn(options, (err: any, mvnResults: any) => {
         if (err && !err.message.includes('Could not find java property')) {
           reject(err);
         } else {
           if (!jinst.isJvmCreated()) {
             jinst.addOption('-Xrs');
+            jinst.addOption('-Dfile.encoding=UTF8');
             const classPath = (mvnResults && mvnResults.classpath || []).concat(customClassPath || []);
             jinst.setupClasspath(classPath);
           }
@@ -56,17 +83,47 @@ export class JDBCDriver extends BaseDriver {
 
   protected jdbcProps: any;
 
-  public constructor(config: Partial<JDBCDriverConfiguration> = {}) {
-    super();
+  public constructor(
+    config: Partial<JDBCDriverConfiguration> & {
+      /**
+       * Data source name.
+       */
+      dataSource?: string,
 
-    const { poolOptions, ...dbOptions } = config || {};
+      /**
+       * Max pool size value for the [cube]<-->[db] pool.
+       */
+      maxPoolSize?: number,
 
-    const dbTypeDescription = JDBCDriver.dbTypeDescription((config.dbType || process.env.CUBEJS_DB_TYPE) as string);
+      /**
+       * Time to wait for a response from a connection after validation
+       * request before determining it as not valid. Default - 60000 ms.
+       */
+      testConnectionTimeout?: number,
+    } = {}
+  ) {
+    super({
+      testConnectionTimeout: config.testConnectionTimeout || 60000,
+    });
+
+    const dataSource =
+      config.dataSource ||
+      assertDataSource('default');
+
+    const { poolOptions, ...dbOptions } = config;
+
+    const dbTypeDescription = JDBCDriver.dbTypeDescription(
+      <string>(config.dbType || getEnv('dbType', { dataSource })),
+    );
 
     this.config = {
-      dbType: process.env.CUBEJS_DB_TYPE,
-      url: process.env.CUBEJS_JDBC_URL || dbTypeDescription && dbTypeDescription.jdbcUrl(),
-      drivername: process.env.CUBEJS_JDBC_DRIVER || dbTypeDescription && dbTypeDescription.driverClass,
+      dbType: getEnv('dbType', { dataSource }),
+      url:
+        getEnv('jdbcUrl', { dataSource }) ||
+        dbTypeDescription && dbTypeDescription.jdbcUrl(),
+      drivername:
+        getEnv('jdbcDriver', { dataSource }) ||
+        dbTypeDescription && dbTypeDescription.driverClass,
       properties: dbTypeDescription && dbTypeDescription.properties,
       ...dbOptions
     } as JDBCDriverConfiguration;
@@ -93,24 +150,38 @@ export class JDBCDriver extends BaseDriver {
       },
       // @ts-expect-error Promise<Function> vs Promise<void>
       destroy: async (connection) => promisify(connection.close.bind(connection)),
-      validate: (connection) => {
-        const isValid = promisify(connection.isValid.bind(connection));
-        try {
-          return isValid(this.testConnectionTimeout() / 1000);
-        } catch (e) {
-          return false;
-        }
-      }
+      validate: async (connection) => (
+        new Promise((resolve) => {
+          const isValid = promisify(connection.isValid.bind(connection));
+          const timeout = setTimeout(() => {
+            if (this.logger) {
+              this.logger('Connection validation failed by timeout', {
+                testConnectionTimeout: this.testConnectionTimeout(),
+              });
+            }
+            resolve(false);
+          }, this.testConnectionTimeout());
+          isValid(0).then((valid: boolean) => {
+            clearTimeout(timeout);
+            if (!valid && this.logger) {
+              this.logger('Connection validation failed', {});
+            }
+            resolve(valid);
+          }).catch((e: { stack?: string }) => {
+            clearTimeout(timeout);
+            this.databasePoolError(e);
+            resolve(false);
+          });
+        })
+      )
     }, {
       min: 0,
-      max:
-        process.env.CUBEJS_DB_MAX_POOL && parseInt(process.env.CUBEJS_DB_MAX_POOL, 10) ||
-        this.config.maxPoolSize || 8,
+      max: config.maxPoolSize || getEnv('dbMaxPoolSize', { dataSource }) || 8,
       evictionRunIntervalMillis: 10000,
       softIdleTimeoutMillis: 30000,
       idleTimeoutMillis: 30000,
       testOnBorrow: true,
-      acquireTimeoutMillis: 20000,
+      acquireTimeoutMillis: 120000,
       ...(poolOptions || {})
     }) as ExtendedPool;
   }
@@ -137,10 +208,10 @@ export class JDBCDriver extends BaseDriver {
     try {
       connection = await this.pool._factory.create();
     } catch (e: any) {
-      err = e.message;
+      err = e.message || e;
     }
     if (err) {
-      throw new Error(err);
+      throw new Error(err.toString());
     } else {
       await this.pool._factory.destroy(connection);
     }
@@ -158,7 +229,8 @@ export class JDBCDriver extends BaseDriver {
     const cancelObj: {cancel?: Function} = {};
     const promise = this.queryPromised(queryWithParams, cancelObj, this.prepareConnectionQueries());
     (promise as CancelablePromise<any>).cancel =
-      () => cancelObj.cancel && cancelObj.cancel() || Promise.reject(new Error('Statement is not ready'));
+      () => cancelObj.cancel && cancelObj.cancel() ||
+      Promise.reject(new Error('Statement is not ready'));
     return promise;
   }
 
@@ -174,6 +246,7 @@ export class JDBCDriver extends BaseDriver {
 
   protected async queryPromised(query: string, cancelObj: any, options: any) {
     options = options || {};
+
     try {
       const conn = await this.pool.acquire();
       try {
@@ -194,6 +267,67 @@ export class JDBCDriver extends BaseDriver {
     }
   }
 
+  public async stream(sql: string, values: unknown[], { highWaterMark }: StreamOptions): Promise<DownloadQueryResultsResult> {
+    const conn = await this.pool.acquire();
+    const query = applyParams(sql, values);
+    const cancelObj: {cancel?: Function} = {};
+    try {
+      const createStatement = promisify(conn.createStatement.bind(conn));
+      const statement = await createStatement();
+
+      if (cancelObj) {
+        cancelObj.cancel = promisify(statement.cancel.bind(statement));
+      }
+
+      const executeQuery = promisify(statement.execute.bind(statement));
+      const resultSet = await executeQuery(query);
+      return (await new Promise((resolve, reject) => {
+        resultSet.toObjectIter(
+          (
+            err: unknown,
+            res: {
+                labels: string[],
+                types: number[],
+                rows: { next: nextFn },
+              },
+          ) => {
+            if (err) {
+              reject(err);
+              return;
+            }
+
+            const rowStream = new QueryStream(res.rows.next, highWaterMark);
+            resolve({
+              rowStream,
+              release: () => this.pool.release(conn),
+              types: res.types.map(
+                (t, i) => ({
+                  name: res.labels[i],
+                  type: this.toGenericType(((t === -5 ? 'bigint' : resultSet._types[t]) || 'string').toLowerCase())
+                })
+              )
+            });
+          }
+        );
+      }));
+    } catch (ex: any) {
+      await this.pool.release(conn);
+      if (ex.cause) {
+        throw new Error(ex.cause.getMessageSync());
+      } else {
+        throw ex;
+      }
+    }
+  }
+
+  public async downloadQueryResults(query: string, values: unknown[], options: DownloadQueryResultsOptions): Promise<DownloadQueryResultsResult> {
+    if (options.streamImport) {
+      return this.stream(query, values, options);
+    }
+
+    return super.downloadQueryResults(query, values, options);
+  }
+
   protected async executeStatement(conn: any, query: any, cancelObj?: any) {
     const createStatementAsync = promisify(conn.createStatement.bind(conn));
     const statement = await createStatementAsync();
@@ -204,11 +338,18 @@ export class JDBCDriver extends BaseDriver {
     await setQueryTimeout(600);
     const executeQueryAsync = promisify(statement.execute.bind(statement));
     const resultSet = await executeQueryAsync(query);
-    const toObjArrayAsync =
-      resultSet.toObjArray && promisify(resultSet.toObjArray.bind(resultSet)) ||
-      (() => Promise.resolve(resultSet));
 
-    return toObjArrayAsync();
+    if (resultSet.toObjArray) {
+      const result: any = await (promisify(resultSet.toObjArray.bind(resultSet)))();
+
+      for (const [key, row] of Object.entries(result)) {
+        result[key] = transformRow(row);
+      }
+
+      return result;
+    }
+
+    return resultSet;
   }
 
   public async release() {

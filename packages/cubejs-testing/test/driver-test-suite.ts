@@ -1,5 +1,6 @@
+import jwt from 'jsonwebtoken';
 // eslint-disable-next-line import/no-extraneous-dependencies
-import cubejs, { CubejsApi } from '@cubejs-client/core';
+import cubejs, { CubeApi } from '@cubejs-client/core';
 // eslint-disable-next-line import/no-extraneous-dependencies
 import { afterAll, beforeAll, expect, jest } from '@jest/globals';
 import WebSocketTransport from '@cubejs-client/ws-transport';
@@ -7,7 +8,13 @@ import { uniq } from 'ramda';
 import { BirdBox, Env, getBirdbox } from '../src';
 import { DriverTest } from './driverTests/driverTest';
 
-type SupportedDriverType = 'postgres' | 'questdb' | 'firebolt' | 'bigquery' | 'athena';
+type SupportedDriverType =
+  'postgres' |
+  'questdb' |
+  'firebolt' |
+  'bigquery' |
+  'athena' |
+  'databricks-jdbc';
 
 type TestSuite = {
   config?: Partial<Env>
@@ -18,6 +25,8 @@ type TestSuite = {
 export function executeTestSuite({ type, tests, config = {} }: TestSuite) {
   const testSchemas = uniq(tests.flatMap(t => t.schemas));
 
+  const apiSecret = 'mysupersecret';
+
   const overridedConfig = {
     CUBEJS_DEV_MODE: 'true',
     CUBEJS_WEB_SOCKETS: 'true',
@@ -27,10 +36,12 @@ export function executeTestSuite({ type, tests, config = {} }: TestSuite) {
     CUBEJS_ROLLUP_ONLY: 'false',
     ...config,
   };
+
   describe(`${type} driver tests`, () => {
     jest.setTimeout(60 * 5 * 1000);
+
     let box: BirdBox;
-    let client: CubejsApi;
+    let client: CubeApi;
     let transport: WebSocketTransport;
 
     beforeAll(async () => {
@@ -41,8 +52,9 @@ export function executeTestSuite({ type, tests, config = {} }: TestSuite) {
       );
       transport = new WebSocketTransport({
         apiUrl: box.configuration.apiUrl,
+        authorization: jwt.sign({}, apiSecret)
       });
-      client = cubejs(async () => 'test', {
+      client = cubejs(async () => jwt.sign({}, apiSecret), {
         apiUrl: box.configuration.apiUrl,
         // transport,
       });
@@ -81,12 +93,27 @@ export function executeTestSuite({ type, tests, config = {} }: TestSuite) {
           const promise = async () => {
             await client.load(t.query);
           };
-          await expect(promise).rejects.toThrow('error');
+          if (t.expectArray) {
+            const promiseInstance = promise();
+            for (const expectFn of t.expectArray) {
+              await promiseInstance.catch((e) => expectFn(e as Error));
+            }
+          } else {
+            await expect(promise).rejects.toMatchSnapshot('error');
+          }
         };
         if (t.skip) {
           test.skip(testNameWithHash, cbFnError);
         } else {
           test(testNameWithHash, cbFnError);
+        }
+      } else if (t.type === 'testFn') {
+        if (t.skip) {
+          // eslint-disable-next-line no-loop-func
+          test.skip(testNameWithHash, () => t.testFn(client));
+        } else {
+          // eslint-disable-next-line no-loop-func
+          test(testNameWithHash, () => t.testFn(client));
         }
       }
     }
