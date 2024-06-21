@@ -35,6 +35,7 @@ CD part will take place from codefresh pipeline and will only publish specific p
 `3. this will resolve in platform analytics from our fork but will resolve it correctly in cube-js code.
 see examples in platform-analytics package.json file
 
+
 <p align="center">
   <a href="https://cube.dev?ref=github-readme"><img src="https://raw.githubusercontent.com/cube-js/cube/master/docs/content/cube-logo-with-bg.png" alt="Cube — Semantic Layer for Data Applications" width="300px"></a>
 </p>
